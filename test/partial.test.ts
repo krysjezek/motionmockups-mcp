@@ -40,6 +40,71 @@ test("a partial is hidden and named for its result; publishing gives the name, t
   await assert.rejects(publishOutput(path.join(dir, "film.mp4"), "x", "mp4"), /not a partial/);
 });
 
+/** A partial holding `content`, ready to publish. */
+async function writtenPartial(dir: string, content: string): Promise<string> {
+  const partial = await createPartial(dir, "film", "mp4");
+  await partial.handle.writeFile(content);
+  await partial.handle.close();
+  return partial.path;
+}
+
+const failing = (code: string) => async () => {
+  throw Object.assign(new Error(`link failed: ${code}`), { code });
+};
+
+test("with no hard links (EISDIR, as Windows reports FAT and exFAT, or any code but EEXIST), the partial is renamed onto a reserved name", async (t) => {
+  for (const code of ["EISDIR", "EUNKNOWN_FS"]) {
+    const dir = folder(t);
+    fs.writeFileSync(path.join(dir, "film.mp4"), "taken");
+    const partial = await writtenPartial(dir, "whole film");
+    const renames: string[] = [];
+    const published = await publishOutput(partial, "film", "mp4", {
+      link: failing(code),
+      rename: async (from, to) => {
+        renames.push(to);
+        fs.renameSync(from, to);
+      },
+    });
+    assert.equal(published, path.join(dir, "film (2).mp4"), code);
+    assert.deepEqual(renames, [published], code);
+    assert.equal(fs.readFileSync(published, "utf8"), "whole film");
+    assert.equal(fs.readFileSync(path.join(dir, "film.mp4"), "utf8"), "taken", "never overwritten");
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["film (2).mp4", "film.mp4"], `${code}: one final file, no partial`);
+  }
+});
+
+test("a failing rename in the fallback leaves no empty reserved file behind", async (t) => {
+  const dir = folder(t);
+  const partial = await writtenPartial(dir, "whole film");
+  await assert.rejects(
+    publishOutput(partial, "film", "mp4", {
+      link: failing("EISDIR"),
+      rename: async () => {
+        throw Object.assign(new Error("busy: antivirus"), { code: "EBUSY" });
+      },
+    }),
+    /antivirus/,
+  );
+  // The partial stays for its caller (deliverFile removes it); no finished-looking film.mp4.
+  assert.deepEqual(fs.readdirSync(dir), [path.basename(partial)]);
+});
+
+test("EEXIST still moves on to the next name with a real link", async (t) => {
+  const dir = folder(t);
+  fs.writeFileSync(path.join(dir, "film.mp4"), "taken");
+  const partial = await writtenPartial(dir, "mine");
+  let renamed = false;
+  const published = await publishOutput(partial, "film", "mp4", {
+    link: (a, b) => fs.promises.link(a, b),
+    rename: async () => {
+      renamed = true;
+    },
+  });
+  assert.equal(published, path.join(dir, "film (2).mp4"));
+  assert.equal(renamed, false, "the link was used");
+  assert.deepEqual(fs.readdirSync(dir).sort(), ["film (2).mp4", "film.mp4"]);
+});
+
 test("deliverFile removes its partial when the copy fails, and publishes only a whole file", async (t) => {
   const dir = folder(t);
   const failing = new Readable({
@@ -89,6 +154,8 @@ test("only the adapter's own partial names are ever removed", async (t) => {
     ".film.mp4.partial-0123456789abcdef0",
     "film.mp4.partial-0123456789abcdef",
     ".film.mp4.partial-0123456789abcde",
+    // Upper-case hex: not a name the adapter makes.
+    ".film.mp4.partial-0123456789ABCDEF",
   ];
   for (const name of keep) {
     fs.writeFileSync(path.join(dir, name), "x");

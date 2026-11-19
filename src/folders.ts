@@ -395,7 +395,8 @@ export async function createOutput(folder: string, name: string, ext: string): P
 }
 
 /** A file being written: hidden, named for its result, and never mistaken for a finished one. */
-const PARTIAL = /^\.(.+)\.([a-z0-9]{1,10})\.partial-[0-9a-f]{16}$/i;
+// Lower-case hex only, as createPartial writes it: cleanup touches nothing else.
+const PARTIAL = /^\.(.+)\.([A-Za-z0-9]{1,10})\.partial-[0-9a-f]{16}$/;
 const PARTIAL_STALE_MS = 24 * 60 * 60 * 1000;
 
 /**
@@ -415,13 +416,22 @@ export async function createPartial(folder: string, name: string, ext: string): 
   throw new Error(`No partial file could be created in ${folder}.`);
 }
 
+/** The two file operations publishing uses; tests replace them to stand in for other file systems. */
+export interface PublishOps {
+  link: (existing: string, created: string) => Promise<void>;
+  rename: (from: string, to: string) => Promise<void>;
+}
+const FS_OPS: PublishOps = { link, rename };
+
 /**
  * Gives a finished partial file its name: `<name>.<ext>`, or ` (2)` and so on when taken.
  * A hard link never replaces an entry (a dangling link included), so nothing is overwritten,
- * and the name appears only once the file is whole. Where the file system has no hard links
- * (FAT, exFAT), the name is reserved by exclusive create and the partial renamed onto it.
+ * and the name appears only once the file is whole. When the link fails for any reason but a
+ * taken name (FAT and exFAT have no hard links, and Windows reports that as EISDIR among
+ * others), the name is reserved by exclusive create and the whole partial renamed onto it; if
+ * that rename fails, the empty reservation is removed, so no finished-looking file is left.
  */
-export async function publishOutput(partial: string, name: string, ext: string): Promise<string> {
+export async function publishOutput(partial: string, name: string, ext: string, ops: PublishOps = FS_OPS): Promise<string> {
   const folder = path.dirname(partial);
   const extension = checkedExtension(ext);
   const real = await realFolder(folder);
@@ -430,15 +440,19 @@ export async function publishOutput(partial: string, name: string, ext: string):
   for (let n = 1; n <= 9999; n++) {
     const file = candidate(real, base, extension, n);
     try {
-      await link(partial, file);
+      await ops.link(partial, file);
     } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "EEXIST") continue;
-      if (code !== "EPERM" && code !== "ENOTSUP" && code !== "ENOSYS" && code !== "EXDEV" && code !== "EINVAL") throw error;
-      // No hard links here: reserve the name, then move the whole file onto the reservation.
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+      // No hard link here: the partial is the adapter's own regular file, so moving it is safe.
       const reserved = await createOutput(real, name, extension);
-      await reserved.handle.close();
-      await rename(partial, reserved.path);
+      try {
+        await reserved.handle.close();
+        await ops.rename(partial, reserved.path);
+      } catch (moveError) {
+        await reserved.handle.close().catch(() => {});
+        await unlink(reserved.path).catch(() => {});
+        throw moveError;
+      }
       return reserved.path;
     }
     await unlink(partial).catch(() => {});
