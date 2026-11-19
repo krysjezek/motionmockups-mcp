@@ -459,3 +459,18 @@ test("dataFolder per platform, with MOTIONMOCKUPS_DATA winning", () => {
   assert.equal(dataFolder({ LOCALAPPDATA: "C:\\L", MOTIONMOCKUPS_DATA: "D:\\mm" }, "win32"), "D:\\mm");
   assert.equal(typeof dataFolder(), "string");
 });
+
+test("safeName is linear: a 1,000,000-character run of dots, spaces or dashes takes well under 100 ms", () => {
+  for (const run of [".", " ", "-", ". -"]) {
+    const name = `a${run.repeat(Math.ceil(1_000_000 / run.length))}a`;
+    const started = performance.now();
+    const safe = safeName(name, "fallback");
+    const took = performance.now() - started;
+    assert.ok(took < 100, `${JSON.stringify(run)}: ${took.toFixed(1)} ms`);
+    assert.equal(safe, "a", JSON.stringify(run));
+  }
+  // A long name is cut before it is cleaned, and never ends on half a character.
+  const emoji = safeName(`${"😀".repeat(500_000)}.`, "fallback");
+  assert.ok(emoji.length > 0 && Buffer.byteLength(emoji) <= 200 && !emoji.includes("\ufffd"));
+  assert.equal(safeName(`${"a".repeat(1_000_000)}`, "fallback"), "a".repeat(120));
+});

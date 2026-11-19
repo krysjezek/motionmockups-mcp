@@ -277,9 +277,12 @@ export async function sweepStaging(staging: string): Promise<string[]> {
   return removed;
 }
 
+/** File systems allow 255 characters in a name; the page never makes a longer one. */
+const NAME_MAX = 255;
+
 /** A file name the page handed back, as stem and extension; null when it is not one the page makes. */
 export function deliveredName(name: unknown): { stem: string; ext: string } | null {
-  if (typeof name !== "string") return null;
+  if (typeof name !== "string" || name.length > NAME_MAX) return null;
   const match = /^(.+)\.([a-z0-9]+)$/i.exec(name);
   if (!match) return null;
   const ext = match[2]!.toLowerCase();
@@ -295,7 +298,7 @@ interface AgentFile {
 type AgentResult = { ok: true; files: AgentFile[]; warnings: string[] } | { ok: false; problems: Problem[] };
 
 /** The page's result, checked for shape: its refusals pass through unchanged, anything else is a contract problem. */
-function checkResult(value: unknown, origin: URL): AgentResult {
+export function checkResult(value: unknown, origin: URL): AgentResult {
   const v = value as Record<string, unknown> | null;
   if (typeof v !== "object" || v === null) throw contractProblem("render() answered with no result.");
   if (v.ok === false) {
@@ -316,6 +319,12 @@ function checkResult(value: unknown, origin: URL): AgentResult {
       file.bytes < 0
     )
       throw contractProblem("a file without a name, a size and a blob link on the site.");
+    if (file.name.length > NAME_MAX)
+      throw problemError(
+        "site",
+        `The site's agent page named a file with ${file.name.length} characters; a file name has at most ${NAME_MAX}.`,
+        "Try the render again in a few minutes. If it keeps happening, report it at https://motionmockups.com/contact.",
+      );
     return { name: file.name, bytes: file.bytes, url: file.url };
   });
   const warnings = Array.isArray(v.warnings) ? v.warnings.filter((w): w is string => typeof w === "string") : [];

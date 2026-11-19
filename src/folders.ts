@@ -309,9 +309,19 @@ const RESERVED = /^(con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout
 const MAX_CHARS = 120;
 const MAX_BYTES = 200; // file systems allow 255 bytes; this leaves room for " (n)" and the extension
 
+/** `s` without the spaces, dots and dashes it ends with; a loop, since `/[\s.-]+$/` is quadratic in a long run. */
+function trimEnd(s: string): string {
+  let end = s.length;
+  while (end > 0 && /[\s.-]/.test(s[end - 1]!)) end--;
+  return s.slice(0, end);
+}
+
 function clean(raw: string | undefined): string {
   if (!raw) return "";
-  let s = raw
+  // Far more than a name keeps, cut first so nothing below runs on a page's megabyte; never half a character.
+  let bounded = raw.slice(0, 4 * MAX_BYTES);
+  if (/[\ud800-\udbff]$/.test(bounded)) bounded = bounded.slice(0, -1);
+  let s = bounded
     .normalize("NFC")
     // Control, zero-width and direction-override characters.
     .replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, "")
@@ -319,13 +329,13 @@ function clean(raw: string | undefined): string {
     .replace(/[<>:"/\\|?*]+/g, "-")
     .replace(/\s+/g, " ")
     .replace(/-{2,}/g, "-")
-    .replace(/^[\s.-]+/, "")
-    .replace(/[\s.-]+$/, "");
+    .replace(/^[\s.-]+/, "");
+  s = trimEnd(s);
   const stem = s.split(".")[0]!;
   if (RESERVED.test(stem)) s = `${stem}_${s.slice(stem.length)}`;
   let chars = Array.from(s).slice(0, MAX_CHARS);
   while (chars.length > 0 && Buffer.byteLength(chars.join("")) > MAX_BYTES) chars = chars.slice(0, -1);
-  return chars.join("").replace(/[\s.-]+$/, "");
+  return trimEnd(chars.join(""));
 }
 
 /** A file name (without extension) that is safe on every platform and cannot leave its folder. */

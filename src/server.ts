@@ -133,7 +133,7 @@ const recording = z
   .describe(
     "Path of the screen recording (MP4, MOV, WebM, MKV) or screenshot (PNG, JPEG, WebP, AVIF), inside the project folder. Without one, the screen shows a placeholder.",
   );
-const name = z.string().min(1).describe("File name for the result, without extension.");
+const name = z.string().min(1).max(200).describe("File name for the result, without extension, at most 200 characters.");
 
 const listScenesInput = z
   .object({

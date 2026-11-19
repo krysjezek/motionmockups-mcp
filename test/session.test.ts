@@ -10,7 +10,7 @@ import { findChrome } from "../src/chrome/find.ts";
 import { launchChrome } from "../src/chrome/launch.ts";
 import { allowedFolders } from "../src/folders.ts";
 import { acquireRenderLock, LOCK_NAME } from "../src/lock.ts";
-import { FREE_NOTICE, pageProgress, renderOnce, stopSignal, sweepStaging, type RenderRequest } from "../src/session.ts";
+import { checkResult, deliveredName, FREE_NOTICE, pageProgress, renderOnce, stopSignal, sweepStaging, type RenderRequest } from "../src/session.ts";
 
 const NOTICE = "Watermarked preview for evaluation only. Publishing it needs Motion Mockups Pro (https://motionmockups.com/pricing).";
 const TEST_ORIGIN = process.env.MOTIONMOCKUPS_TEST_ORIGIN?.trim();
@@ -132,6 +132,21 @@ test("page progress is checked: texts capped at 200 characters, 0 <= completed <
     42,
   ])
     assert.equal(pageProgress(bad), null, String(bad).slice(0, 60));
+});
+
+const SITE = new URL("http://127.0.0.1:4173");
+const blob = `blob:${SITE.origin}/0f8fad5b-d9cb-469f-a165-70867728950e`;
+
+test("a page file name longer than 255 characters is refused with code site", () => {
+  const long = `${"a".repeat(252)}.mp4`; // 256
+  assert.equal(deliveredName(long), null);
+  assert.deepEqual(deliveredName(`${"a".repeat(251)}.mp4`), { stem: "a".repeat(251), ext: "mp4" });
+  assert.throws(
+    () => checkResult({ ok: true, files: [{ name: long, bytes: 1, url: blob }] }, SITE),
+    (e: any) => e.code === "site" && /255/.test(e.message) && !e.message.includes("a".repeat(100)),
+  );
+  const fine = checkResult({ ok: true, files: [{ name: `${"a".repeat(251)}.mp4`, bytes: 1, url: blob }] }, SITE);
+  assert.ok(fine.ok);
 });
 
 test("the notice is the exact copy", () => {

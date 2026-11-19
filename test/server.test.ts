@@ -349,6 +349,7 @@ test("tools accept only their documented fields", async (t) => {
     { plan: { ...PLAN, clips: [{ scene: "a", extra: 1 }] } },
     { plan: { ...PLAN, clips: [{ scene: "a", crop: { x: 0.5, w: 1 } }] } },
     { plan: PLAN, still: { seconds: 1, format: "png" } },
+    { plan: PLAN, name: "n".repeat(201) },
   ]) {
     const result = await client.callTool({ name: "render", arguments: args as any });
     assert.equal(result.isError, true, JSON.stringify(args));
@@ -357,6 +358,10 @@ test("tools accept only their documented fields", async (t) => {
     assert.match(problem.message, /render/);
     assert.ok(problem.fix);
   }
+  // A 200-character name is still a name.
+  assert.notEqual((await client.callTool({ name: "render", arguments: { plan: PLAN, name: "n".repeat(200) } })).isError, true);
+  assert.equal(calls.length, 1);
+  calls.length = 0;
   const listed = await client.callTool({ name: "list_scenes", arguments: { device: "iPhone", limit: 3 } });
   assert.equal(listed.isError, true);
   const account = await client.callTool({ name: "account", arguments: { tier: "pro" } });
