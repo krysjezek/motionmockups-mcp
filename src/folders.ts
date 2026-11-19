@@ -3,7 +3,8 @@
 // allowed folders is read, and nothing is written outside `motion-mockups/`.
 
 import { constants } from "node:fs";
-import { lstat, mkdir, open, realpath, stat, type FileHandle } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { link, lstat, mkdir, open, readdir, realpath, rename, stat, unlink, type FileHandle } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -330,45 +331,145 @@ export function safeName(name: string | undefined, fallback: string): string {
   return clean(name) || clean(fallback) || OUTPUT;
 }
 
+/** Creates `file` exclusively, refusing a link planted at the name before or during the create. */
+async function exclusiveCreate(file: string): Promise<FileHandle | null> {
+  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
+  // Any entry already there is taken, a link (even a dangling one) included: Windows has no
+  // O_NOFOLLOW, and its exclusive create follows a dangling link to wherever it points.
+  try {
+    await lstat(file);
+    return null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  let handle: FileHandle;
+  try {
+    handle = await open(file, flags, 0o644);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "EEXIST") return null;
+    throw error;
+  }
+  // A link planted between the check and the create: the file opened is not the entry at the name.
+  try {
+    const [opened, entry] = await Promise.all([handle.stat({ bigint: true }), lstat(file, { bigint: true })]);
+    if (entry.isSymbolicLink() || !entry.isFile() || opened.ino !== entry.ino || opened.dev !== entry.dev) {
+      throw new Error(`${file} changed while it was being created; nothing was written.`);
+    }
+  } catch (error) {
+    await handle.close().catch(() => {});
+    throw error;
+  }
+  return handle;
+}
+
+async function realFolder(folder: string): Promise<string> {
+  const real = await realpath(folder);
+  if (key(real) !== key(folder)) throw new Error(`${folder} is a link; results are written only into real folders.`);
+  return real;
+}
+
+const checkedExtension = (ext: string) => {
+  const extension = ext.replace(/^\./, "");
+  if (!/^[a-z0-9]{1,10}$/i.test(extension)) throw new Error(`Not a file extension: ${JSON.stringify(ext)}`);
+  return extension;
+};
+
+/** `<base>.<ext>`, then `<base> (2).<ext>` and so on. */
+const candidate = (folder: string, base: string, extension: string, n: number) =>
+  path.join(folder, `${n === 1 ? base : `${base} (${n})`}.${extension}`);
+
 /**
  * Creates `<folder>/<name>.<ext>` with exclusive create, never replacing a file:
  * a taken name becomes `<name> (2).<ext>`, `<name> (3).<ext>` and so on.
  */
 export async function createOutput(folder: string, name: string, ext: string): Promise<{ path: string; handle: FileHandle }> {
-  const extension = ext.replace(/^\./, "");
-  if (!/^[a-z0-9]{1,10}$/i.test(extension)) throw new Error(`Not a file extension: ${JSON.stringify(ext)}`);
-  const real = await realpath(folder);
-  if (key(real) !== key(folder)) throw new Error(`${folder} is a link; results are written only into real folders.`);
+  const extension = checkedExtension(ext);
+  const real = await realFolder(folder);
   const base = safeName(name, OUTPUT);
-  const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
   for (let n = 1; n <= 9999; n++) {
-    const file = path.join(real, `${n === 1 ? base : `${base} (${n})`}.${extension}`);
-    // Any entry already there is taken, a link (even a dangling one) included: Windows has no
-    // O_NOFOLLOW, and its exclusive create follows a dangling link to wherever it points.
-    try {
-      await lstat(file);
-      continue;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    let handle: FileHandle;
-    try {
-      handle = await open(file, flags, 0o644);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
-      throw error;
-    }
-    // A link planted between the check and the create: the file opened is not the entry at the name.
-    try {
-      const [opened, entry] = await Promise.all([handle.stat({ bigint: true }), lstat(file, { bigint: true })]);
-      if (entry.isSymbolicLink() || !entry.isFile() || opened.ino !== entry.ino || opened.dev !== entry.dev) {
-        throw new Error(`${file} changed while it was being created; nothing was written.`);
-      }
-    } catch (error) {
-      await handle.close().catch(() => {});
-      throw error;
-    }
-    return { path: file, handle };
+    const file = candidate(real, base, extension, n);
+    const handle = await exclusiveCreate(file);
+    if (handle) return { path: file, handle };
   }
   throw new Error(`${folder} already holds 9999 files named ${base}.`);
+}
+
+/** A file being written: hidden, named for its result, and never mistaken for a finished one. */
+const PARTIAL = /^\.(.+)\.([a-z0-9]{1,10})\.partial-[0-9a-f]{16}$/i;
+const PARTIAL_STALE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Creates `<folder>/.<name>.<ext>.partial-<random>` exclusively, to be written and then
+ * published with `publishOutput`. If the writer is killed, what is left is this file, never
+ * a finished-looking `<name>.<ext>`.
+ */
+export async function createPartial(folder: string, name: string, ext: string): Promise<{ path: string; handle: FileHandle }> {
+  const extension = checkedExtension(ext);
+  const real = await realFolder(folder);
+  const base = safeName(name, OUTPUT);
+  for (let tries = 0; tries < 10; tries++) {
+    const file = path.join(real, `.${base}.${extension}.partial-${randomBytes(8).toString("hex")}`);
+    const handle = await exclusiveCreate(file);
+    if (handle) return { path: file, handle };
+  }
+  throw new Error(`No partial file could be created in ${folder}.`);
+}
+
+/**
+ * Gives a finished partial file its name: `<name>.<ext>`, or ` (2)` and so on when taken.
+ * A hard link never replaces an entry (a dangling link included), so nothing is overwritten,
+ * and the name appears only once the file is whole. Where the file system has no hard links
+ * (FAT, exFAT), the name is reserved by exclusive create and the partial renamed onto it.
+ */
+export async function publishOutput(partial: string, name: string, ext: string): Promise<string> {
+  const folder = path.dirname(partial);
+  const extension = checkedExtension(ext);
+  const real = await realFolder(folder);
+  if (!PARTIAL.test(path.basename(partial))) throw new Error(`${partial} is not a partial file.`);
+  const base = safeName(name, OUTPUT);
+  for (let n = 1; n <= 9999; n++) {
+    const file = candidate(real, base, extension, n);
+    try {
+      await link(partial, file);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") continue;
+      if (code !== "EPERM" && code !== "ENOTSUP" && code !== "ENOSYS" && code !== "EXDEV" && code !== "EINVAL") throw error;
+      // No hard links here: reserve the name, then move the whole file onto the reservation.
+      const reserved = await createOutput(real, name, extension);
+      await reserved.handle.close();
+      await rename(partial, reserved.path);
+      return reserved.path;
+    }
+    await unlink(partial).catch(() => {});
+    return file;
+  }
+  throw new Error(`${folder} already holds 9999 files named ${base}.`);
+}
+
+/**
+ * Removes partial files a killed render left in `folder` more than a day ago. Only regular
+ * files named exactly as `createPartial` names them; nothing else is ever touched.
+ */
+export async function removeStalePartials(folder: string, now: number = Date.now()): Promise<string[]> {
+  const removed: string[] = [];
+  let names: string[];
+  try {
+    names = await readdir(folder);
+  } catch {
+    return removed;
+  }
+  for (const name of names) {
+    if (!PARTIAL.test(name)) continue;
+    const file = path.join(folder, name);
+    try {
+      const st = await lstat(file);
+      if (!st.isFile() || now - st.mtimeMs < PARTIAL_STALE_MS) continue;
+      await unlink(file);
+      removed.push(file);
+    } catch {
+      // Gone already, or in use: the next render looks again.
+    }
+  }
+  return removed;
 }

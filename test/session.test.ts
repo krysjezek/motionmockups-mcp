@@ -9,7 +9,7 @@ import { findChrome } from "../src/chrome/find.ts";
 import { launchChrome } from "../src/chrome/launch.ts";
 import { allowedFolders } from "../src/folders.ts";
 import { acquireRenderLock, LOCK_NAME } from "../src/lock.ts";
-import { FREE_NOTICE, renderOnce, stopSignal, type RenderRequest } from "../src/session.ts";
+import { FREE_NOTICE, pageProgress, renderOnce, stopSignal, type RenderRequest } from "../src/session.ts";
 
 const NOTICE = "Watermarked preview for evaluation only. Publishing it needs Motion Mockups Pro (https://motionmockups.com/pricing).";
 const TEST_ORIGIN = process.env.MOTIONMOCKUPS_TEST_ORIGIN?.trim();
@@ -108,6 +108,31 @@ test("stop signal: the caller's cancel, the timeout and a lost lock each stop it
   }
 });
 
+test("page progress is checked: texts capped at 200 characters, 0 <= completed <= total", () => {
+  const long = "x".repeat(2000);
+  assert.deepEqual(pageProgress(JSON.stringify({ phase: "rendering", completed: 3, total: 10, file: "film.mp4" })), {
+    phase: "rendering",
+    completed: 3,
+    total: 10,
+    message: "film.mp4",
+  });
+  const capped = pageProgress(JSON.stringify({ phase: long, completed: 1, total: 2, file: long }))!;
+  assert.equal(capped.phase.length, 200);
+  assert.equal(capped.message!.length, 200);
+  assert.deepEqual(pageProgress(JSON.stringify({ phase: "rendering", completed: 50, total: 10 })), { phase: "rendering", completed: 10, total: 10 });
+  assert.deepEqual(pageProgress(JSON.stringify({ phase: "rendering", completed: -5, total: -1 })), { phase: "rendering", completed: 0, total: 0 });
+  for (const bad of [
+    "not json",
+    JSON.stringify({ phase: "", completed: 0, total: 1 }),
+    JSON.stringify({ phase: "x", completed: "1", total: 1 }),
+    JSON.stringify({ phase: "x", completed: 1 }),
+    JSON.stringify({ phase: 3, completed: 1, total: 1 }),
+    JSON.stringify({ phase: "x", completed: 1, total: 2, file: "y".repeat(20_000) }),
+    42,
+  ])
+    assert.equal(pageProgress(bad), null, String(bad).slice(0, 60));
+});
+
 test("the notice is the exact copy", () => {
   assert.equal(FREE_NOTICE, NOTICE);
 });
@@ -196,7 +221,9 @@ for (const mode of ["headless", "window"] as const) {
       assert.equal(result.ok, false);
       if (result.ok) return;
       assert.equal(result.problems[0]!.code, "busy", JSON.stringify(result.problems));
-      assert.match(result.problems[0]!.fix, /another render/i);
+      // This session holds the lock: the Chrome on the profile is a leftover or the person's own.
+      assert.ok(result.problems[0]!.fix.includes(`close the Chrome that uses ${profile}`), result.problems[0]!.fix);
+      assert.ok(result.problems[0]!.message.includes(profile));
       assert.doesNotMatch(result.problems[0]!.fix, /install/i);
       assert.equal(fs.existsSync(path.join(data, LOCK_NAME)), false, "the lock was released");
     },
@@ -266,6 +293,84 @@ describe("a render session on the agent page", { skip: TEST_ORIGIN ? false : "MO
     return { width: width!, height: height!, frames: frames! };
   };
 
+  const partials = () => fs.readdirSync(path.join(project, "motion-mockups")).filter((f) => f.includes(".partial-"));
+
+  /**
+   * Starts a render while the lock is held, so it checks the recording and then waits; runs
+   * `swap` during the wait, then lets it go on to Chrome and the hand-off.
+   */
+  async function swapWhileWaiting(request: RenderRequest, swap: () => void) {
+    const other = await acquireRenderLock(data);
+    let waiting!: () => void;
+    const waited = new Promise<void>((resolve) => (waiting = resolve));
+    const running = renderOnce(request, ctx({ onProgress: (p) => p.phase === "waiting" && waiting() }));
+    try {
+      await waited;
+      swap();
+    } finally {
+      await other.release();
+    }
+    return running;
+  }
+
+  test("a folder on the recording's path swapped for a link to outside, between the check and the hand-off, is refused", async (t) => {
+    const clips = path.join(project, "clips");
+    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mm-session-outside-")));
+    t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
+    fs.mkdirSync(clips);
+    fs.copyFileSync(recording, path.join(clips, "take.mp4"));
+    fs.copyFileSync(recording, path.join(outside, "take.mp4"));
+    const result = await swapWhileWaiting({ ...film, recording: "clips/take.mp4", name: "swapped" }, () => {
+      fs.renameSync(clips, path.join(project, "clips-before"));
+      // A junction needs no privilege on Windows; elsewhere a directory symlink.
+      fs.symlinkSync(outside, clips, windows ? "junction" : "dir");
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.problems[0]!.code, "folder", JSON.stringify(result.problems));
+    assert.ok(!fs.readdirSync(path.join(project, "motion-mockups")).some((f) => f.startsWith("swapped")));
+    assert.ok(await chromeGone(path.join(data, "chrome-profile")));
+    fs.rmSync(clips, { recursive: false, force: true });
+  });
+
+  test("a recording replaced by another file between the check and the hand-off is refused", async () => {
+    const take = path.join(project, "replaced.mp4");
+    fs.copyFileSync(recording, take);
+    const result = await swapWhileWaiting({ ...film, recording: "replaced.mp4", name: "replaced" }, () => {
+      fs.rmSync(take);
+      fs.copyFileSync(recording, take);
+    });
+    assert.equal(result.ok, false);
+    if (!result.ok) {
+      assert.equal(result.problems[0]!.code, "recording", JSON.stringify(result.problems));
+      assert.match(result.problems[0]!.message, /changed while the render waited/);
+    }
+    assert.ok(!fs.readdirSync(path.join(project, "motion-mockups")).some((f) => f.startsWith("replaced")));
+  });
+
+  test("cancelled while saving file 2 of 2: the refusal names the file already saved, which stays", async () => {
+    const caller = new AbortController();
+    const result = await renderOnce(
+      { ...film, name: "half", plan: { ...(film.plan as object), delivery: "scenes" } },
+      ctx({
+        signal: caller.signal,
+        onProgress: (p) => {
+          if (p.phase === "saving" && p.completed === 1) caller.abort();
+        },
+      }),
+    );
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.problems[0]!.code, "cancelled", JSON.stringify(result.problems));
+    assert.equal(result.saved?.length, 1, JSON.stringify(result));
+    const kept = result.saved![0]!;
+    assert.equal(path.dirname(kept.path), path.join(project, "motion-mockups"));
+    assert.equal(fs.statSync(kept.path).size, kept.bytes);
+    assert.equal(fs.readdirSync(path.join(project, "motion-mockups")).filter((f) => f.startsWith("half")).length, 1);
+    assert.deepEqual(staged(), []);
+    assert.deepEqual(partials(), []);
+    assert.ok(await chromeGone(path.join(data, "chrome-profile")));
+  });
+
   const staged = () => {
     const folder = path.join(data, "staging");
     return fs.existsSync(folder) ? fs.readdirSync(folder) : [];
@@ -289,15 +394,25 @@ describe("a render session on the agent page", { skip: TEST_ORIGIN ? false : "MO
     const phases = new Set(seen.map((p) => p.phase));
     for (const phase of ["starting", "rendering", "saving"]) assert.ok(phases.has(phase), `progress ${phase}: ${[...phases]}`);
     assert.deepEqual(staged(), []);
+    assert.deepEqual(partials(), []);
     assert.ok(await chromeGone(path.join(data, "chrome-profile")));
     assert.equal(fs.existsSync(path.join(data, LOCK_NAME)), false);
   });
 
-  test('a second render with the same name gives " (2)"', async () => {
+  test('a second render with the same name gives " (2)"; it removes partials a killed render left a day ago, and only those', async () => {
+    const out = path.join(project, "motion-mockups");
+    const old = path.join(out, ".film.mp4.partial-00112233445566aa");
+    const fresh = path.join(out, ".film.mp4.partial-00112233445566bb");
+    for (const file of [old, fresh]) fs.writeFileSync(file, "half a film");
+    const then = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(old, then, then);
     const result = await renderOnce(film, ctx());
     assert.ok(result.ok, JSON.stringify(result));
-    assert.equal(result.value.files[0]!.path, path.join(project, "motion-mockups", "film (2).mp4"));
-    assert.ok(fs.existsSync(path.join(project, "motion-mockups", "film.mp4")), "the first is still there");
+    assert.equal(result.value.files[0]!.path, path.join(out, "film (2).mp4"));
+    assert.ok(fs.existsSync(path.join(out, "film.mp4")), "the first is still there");
+    assert.equal(fs.existsSync(old), false, "the day-old partial is removed");
+    assert.ok(fs.existsSync(fresh), "a fresh partial is kept");
+    fs.rmSync(fresh);
   });
 
   test("aborting mid-render gives cancelled; staging is empty, Chrome is gone, and a new render works", async (t) => {

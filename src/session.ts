@@ -11,16 +11,27 @@
 // Everything awaited is bounded: every CDP command has its own time limit, and the render
 // stops on the caller's signal, the render timeout or a lost lock, whichever comes first.
 
+import { once } from "node:events";
 import { createReadStream } from "node:fs";
 import { mkdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
+import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 
 import type { Cdp } from "./chrome/cdp.ts";
 import { problemError, type ProblemError } from "./chrome/cdp.ts";
 import { findChrome } from "./chrome/find.ts";
 import { launchChrome, openPage, type Chrome, type ChromeStartError } from "./chrome/launch.ts";
-import { createOutput, outputFolder, readableRecording, safeName, type Checked, type Problem } from "./folders.ts";
+import {
+  createPartial,
+  outputFolder,
+  publishOutput,
+  readableRecording,
+  removeStalePartials,
+  safeName,
+  type Checked,
+  type Problem,
+} from "./folders.ts";
 import { acquireRenderLock, type Held } from "./lock.ts";
 
 export interface RenderRequest {
@@ -35,6 +46,12 @@ export interface Delivered {
   warnings: string[];
   notice: string;
 }
+
+/**
+ * A render's result. A refusal after some files were already saved (file 2 of 3 failed, or the
+ * render was cancelled while saving) lists them in `saved`: they stay in motion-mockups/.
+ */
+export type Rendered = { ok: true; value: Delivered } | { ok: false; problems: Problem[]; saved?: Delivered["files"] };
 
 export interface Progress {
   phase: string;
@@ -98,11 +115,13 @@ const contractProblem = (detail: string): ProblemError =>
     "Restart the MCP server so it runs the current motionmockups version (npx -y motionmockups@latest mcp), then try again.",
   );
 
+// This session already holds the render lock, so the Chrome on the profile is most likely
+// one left over from a render that was killed, or a window the person opened on it.
 const busyProblem = (profile: string): ProblemError =>
   problemError(
     "busy",
-    `Another Chrome is using the adapter's profile (${profile}).`,
-    "Another render is running on this computer. Wait for it to finish, then try the render again.",
+    `Another Chrome is already using the adapter's profile (${profile}), most likely one left over from an earlier render.`,
+    `If no render is running, close the Chrome that uses ${profile} and try again. If another render is running, wait for it to finish.`,
   );
 
 const hasProblemShape = (value: unknown): value is Problem =>
@@ -178,6 +197,58 @@ function until<T>(work: Promise<T>, signal: AbortSignal, ms: number, onTimeout: 
   });
 }
 
+const PROGRESS_TEXT = 200;
+const PROGRESS_PAYLOAD = 10_000;
+const progressText = (v: unknown) => (typeof v === "string" && v ? v.slice(0, PROGRESS_TEXT) : undefined);
+
+/** The page's progress payload, checked: texts at most 200 characters, 0 <= completed <= total. Null when it is not progress. */
+export function pageProgress(payload: unknown): Progress | null {
+  if (typeof payload !== "string" || payload.length > PROGRESS_PAYLOAD) return null;
+  let p: any;
+  try {
+    p = JSON.parse(payload);
+  } catch {
+    return null;
+  }
+  const phase = progressText(p?.phase);
+  if (!phase || typeof p.completed !== "number" || typeof p.total !== "number" || !Number.isFinite(p.completed) || !Number.isFinite(p.total))
+    return null;
+  const total = Math.max(0, p.total);
+  const completed = Math.min(Math.max(0, p.completed), total);
+  const message = progressText(p.file);
+  return { phase, completed, total, ...(message ? { message } : {}) };
+}
+
+/**
+ * Writes `source` (a staged file, or a stream) into `folder` as `<stem>.<ext>`: first under a
+ * hidden partial name, then published once whole. A failure removes the partial; a kill
+ * leaves only the partial, which a later render removes once it is a day old.
+ */
+export async function deliverFile(source: string | Readable, folder: string, stem: string, ext: string, signal?: AbortSignal): Promise<string> {
+  const partial = await createPartial(folder, stem, ext);
+  try {
+    const out = partial.handle.createWriteStream();
+    const input = typeof source === "string" ? createReadStream(source) : source;
+    if (signal) await pipeline(input, out, { signal });
+    else await pipeline(input, out);
+    if (!out.closed) await once(out, "close");
+    return await publishOutput(partial.path, stem, ext);
+  } catch (error) {
+    await partial.handle.close().catch(() => {});
+    await rm(partial.path, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+/** A file's identity on its volume, to know it is still the file that was checked. */
+async function identity(file: string): Promise<string> {
+  const st = await stat(file, { bigint: true });
+  return `${st.dev}:${st.ino}`;
+}
+
+/** Chrome's download ids are UUIDs; anything else is never joined to a path. */
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** A file name the page handed back, as stem and extension; null when it is not one the page makes. */
 export function deliveredName(name: unknown): { stem: string; ext: string } | null {
   if (typeof name !== "string") return null;
@@ -240,16 +311,22 @@ function progressForwarder(onProgress: (p: Progress) => void) {
   };
 }
 
-export async function renderOnce(request: RenderRequest, context: SessionContext): Promise<Checked<Delivered>> {
+export async function renderOnce(request: RenderRequest, context: SessionContext): Promise<Rendered> {
   const report = progressForwarder(context.onProgress);
   if (context.signal.aborted) return refusal(cancelledProblem());
 
   // 1. The recording, the output folder and Chrome, before anything waits.
   let recording: string | undefined;
+  let recordingId = "";
   if (request.recording !== undefined) {
     const checked = await readableRecording(request.recording, context.allowed);
     if (!checked.ok) return checked;
     recording = checked.value.path;
+    try {
+      recordingId = await identity(recording);
+    } catch {
+      return refusal(problemError("recording", `${recording} cannot be read.`, "Check that the recording has finished saving, then try again."));
+    }
   }
   const output = await outputFolder(context.allowed);
   if (!output.ok) return output;
@@ -287,6 +364,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
   const profile = path.join(context.data, "chrome-profile");
   const staging = path.join(context.data, "staging");
   const stagedHere = new Set<string>();
+  const delivered: Delivered["files"] = [];
   const unsubscribe: (() => void)[] = [];
   let launching: Promise<Chrome> | undefined;
   let chrome: Chrome | undefined;
@@ -322,6 +400,9 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
   };
 
   try {
+    // What a render killed mid-copy left here a day or more ago (only the adapter's own partial names).
+    await removeStalePartials(output.value);
+
     // 3. Chrome on the adapter's own profile.
     report({ phase: "starting", completed: 0, total: 1, message: "Opening Chrome." }, true);
     await mkdir(staging, { recursive: true });
@@ -349,15 +430,9 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
     // 4. The progress bridge, before the page loads.
     unsubscribe.push(
       cdp.on("Runtime.bindingCalled", (params, from) => {
-        if (from !== sessionId || params?.name !== BINDING || typeof params.payload !== "string") return;
-        let p: any;
-        try {
-          p = JSON.parse(params.payload);
-        } catch {
-          return;
-        }
-        if (typeof p?.phase !== "string" || !Number.isFinite(p.completed) || !Number.isFinite(p.total)) return;
-        report({ phase: p.phase, completed: p.completed, total: p.total, ...(typeof p.file === "string" ? { message: p.file } : {}) });
+        if (from !== sessionId || params?.name !== BINDING) return;
+        const p = pageProgress(params.payload);
+        if (p) report(p);
       }),
     );
     await send("Page.enable");
@@ -402,12 +477,23 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
     }
     pageReady = true;
 
-    // 6. The recording, by its real path; Chrome reads it from disk.
+    // 6. The recording, by its real path; Chrome reads it from disk. Checked again first: the lock
+    // wait, the launch and the page load came between, and a folder on the path may have been
+    // swapped for a link since.
     if (recording) {
       const field = (await send("Runtime.evaluate", { expression: `document.getElementById("agent-recording")` })) as any;
       const objectId = field?.result?.objectId;
       if (!objectId) throw contractProblem("the page has no #agent-recording.");
-      await send("DOM.setFileInputFiles", { files: [recording], objectId });
+      const again = await readableRecording(request.recording!, context.allowed);
+      if (!again.ok) return again;
+      const same = again.value.path === recording && (await identity(again.value.path).catch(() => "")) === recordingId;
+      if (!same)
+        throw problemError(
+          "recording",
+          `${request.recording} changed while the render waited its turn: it is no longer the file that was checked.`,
+          "Let the recording finish saving, then send the request again.",
+        );
+      await send("DOM.setFileInputFiles", { files: [again.value.path], objectId });
     }
 
     // 7. The render, as a free preview.
@@ -442,13 +528,14 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
     if (!result.ok) return { ok: false, problems: result.problems };
 
     // 8. Each file: saved by Chrome into staging, streamed into motion-mockups/, staging removed.
-    const delivered: Delivered["files"] = [];
     const begun = new Map<string, string>(); // url -> guid
     const states = new Map<string, { state: string; received: number; total: number }>();
     let changed: () => void = () => {};
     unsubscribe.push(
       cdp.on("Browser.downloadWillBegin", (params) => {
-        if (typeof params?.guid !== "string" || typeof params.url !== "string") return;
+        if (typeof params?.guid !== "string" || !GUID.test(params.guid) || typeof params.url !== "string") return;
+        // Removed in `finally` unless it was saved, whenever the render stops from here on.
+        stagedHere.add(params.guid);
         begun.set(params.url, params.guid);
         changed();
       }),
@@ -495,7 +582,6 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
         DOWNLOAD_START_MS,
         () => problemError("download", `Chrome did not start saving ${file.name}.`, "Try the render again."),
       );
-      stagedHere.add(guid);
       // Each change of state restarts the stall limit.
       let lastReceived = -1;
       for (;;) {
@@ -516,31 +602,20 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
       if (size !== file.bytes)
         throw problemError("download", `${file.name} was saved with ${size} bytes, not ${file.bytes}.`, "Try the render again.");
 
-      let created;
+      let saved: string;
       try {
-        created = await createOutput(output.value, name.stem, name.ext);
+        saved = await deliverFile(from, output.value, name.stem, name.ext, signal);
       } catch (error) {
-        throw problemError(
-          "output",
-          `${file.name} could not be created in ${output.value}: ${(error as Error).message}`,
-          `Check that ${output.value} can be written to.`,
-        );
-      }
-      try {
-        await pipeline(createReadStream(from), created.handle.createWriteStream(), { signal });
-      } catch (error) {
-        await created.handle.close().catch(() => {});
-        await rm(created.path, { force: true }).catch(() => {});
         if (signal.aborted) throw signal.reason;
         throw problemError(
           "output",
-          `${file.name} could not be written to ${created.path}: ${(error as Error).message}`,
+          `${file.name} could not be written to ${output.value}: ${(error as Error).message}`,
           `Check that ${output.value} can be written to and has room.`,
         );
       }
       await rm(from, { force: true });
       stagedHere.delete(guid);
-      delivered.push({ path: created.path, bytes: size });
+      delivered.push({ path: saved, bytes: size });
     }
     report({ phase: "saving", completed: result.files.length, total: result.files.length }, true);
 
@@ -550,8 +625,9 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
 
     return { ok: true, value: { files: delivered, warnings: result.warnings, notice: FREE_NOTICE } };
   } catch (error) {
-    // A stop wins over whatever it interrupted: say why the render stopped.
-    return refusal(asProblem(signal.aborted ? signal.reason : error));
+    // A stop wins over whatever it interrupted: say why the render stopped. Files already saved stay, and are named.
+    const problems = [asProblem(signal.aborted ? signal.reason : error)];
+    return delivered.length ? { ok: false, problems, saved: [...delivered] } : { ok: false, problems };
   } finally {
     stop.dispose();
     if (cdp && pageReady) {
