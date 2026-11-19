@@ -11,8 +11,11 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ListRootsRequestSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 
 import { FALLBACK_BRIEFING, MAX_BRIEFING_CHARS, checkCatalog, type AgentCatalog } from "../src/catalog.ts";
+import type { Launcher } from "../src/connect.ts";
 import { createServer, sdkProblem, settingsFromEnv, type ServerDeps } from "../src/server.ts";
 import type { Rendered, RenderRequest, SessionContext } from "../src/session.ts";
+import { TOKEN_FILE, writeToken } from "../src/token.ts";
+import { agentSite, approved, denied, pending, statusFor, TOKEN, unavailable, USER_CODE, type SiteOptions } from "./fixtures/agent-site.ts";
 
 const ORIGIN = new URL("http://127.0.0.1:4173");
 const NOTICE = "Watermarked preview for evaluation only. Publishing it needs Motion Mockups Pro (https://motionmockups.com/pricing).";
@@ -81,23 +84,29 @@ async function start(
     /** The client declares roots, but answering roots/list fails while this returns true. */
     rootsFail?: () => boolean;
     log?: (line: string) => void;
+    origin?: URL;
+    data?: string;
+    openBrowser?: Launcher;
   } = {},
 ): Promise<Started> {
   const calls: Call[] = [];
   const delivered: Rendered = { ok: true, value: { files: [{ path: "/p/motion-mockups/a.mp4", bytes: 10 }], warnings: [], notice: NOTICE } };
   const deps: ServerDeps = {
-    origin: ORIGIN,
+    origin: options.origin ?? ORIGIN,
     env: options.env ?? {},
     fetch: options.fetch ?? catalogFetch(() => jsonResponse(CATALOG)).fn,
     renderOnce: async (request, context) => {
       calls.push({ request, context });
       return options.renderOnce ? options.renderOnce(request, context) : delivered;
     },
-    data: path.join(os.tmpdir(), "mm-server-test-data"),
+    data: options.data ?? temp(t, "mm-server-data-"),
     chromeMode: "headless",
     timeoutMs: 20 * 60_000,
     version: "0.0.0-test",
     log: options.log ?? (() => {}),
+    // 5 s of the site's poll interval is 25 ms here.
+    connectTimeScale: 0.005,
+    openBrowser: options.openBrowser ?? (() => assert.fail("a test opened a browser")),
   };
   const adapter = await createServer(deps);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -163,10 +172,10 @@ test("a briefing longer than 8,000 characters is not passed on: the fallback is 
   assert.equal(scenes.scenes.length, 3);
 });
 
-test("the tools are the five documented ones", async (t) => {
+test("the tools are the six documented ones", async (t) => {
   const { client } = await start(t);
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map((tool) => tool.name).sort(), ["account", "list_scenes", "recording_spec", "render", "still"]);
+  assert.deepEqual(tools.map((tool) => tool.name).sort(), ["account", "connect_account", "list_scenes", "recording_spec", "render", "still"]);
   for (const tool of tools) {
     assert.ok(tool.description && tool.description.length < 400, `${tool.name} has a short description`);
     assert.equal((tool.inputSchema as any).additionalProperties, false, `${tool.name} accepts only its own fields`);
@@ -229,7 +238,7 @@ test("recording_spec gives every value from the catalog", async (t) => {
   assert.equal(structured(unknown).problems[0].code, "device");
 });
 
-test("account says free renders are watermarked previews and sign-in is coming", async (t) => {
+test("account, not connected: free renders are watermarked previews, and connect_account is the way to Pro", async (t) => {
   const { client } = await start(t);
   const result = structured(await client.callTool({ name: "account", arguments: {} }));
   assert.equal(result.signedIn, false);
@@ -237,8 +246,8 @@ test("account says free renders are watermarked previews and sign-in is coming",
   assert.match(result.note, /watermarked preview/i);
   assert.match(result.note, /evaluation only/i);
   assert.match(result.note, /Pro/);
-  assert.match(result.note, /sign/i);
-  assert.doesNotMatch(result.note, /20\d\d|soon as|tomorrow|next week/i);
+  assert.match(result.note, /connect_account/);
+  assert.doesNotMatch(result.note, /20\d\d|soon as|tomorrow|next week|coming/i);
 });
 
 test("render passes roots and env folders as allowed", async (t) => {
@@ -574,7 +583,7 @@ test("an unknown tool names the tools there are; other SDK errors are the adapte
   const [problem] = structured(result).problems;
   assert.equal(problem.code, "tool");
   assert.match(problem.message, /make_video/);
-  assert.equal(problem.fix, "Use one of: list_scenes, recording_spec, render, still, account.");
+  assert.equal(problem.fix, "Use one of: list_scenes, recording_spec, render, still, account, connect_account.");
 
   assert.equal(sdkProblem("MCP error -32602: Tool render disabled").code, "tool");
   assert.equal(sdkProblem("MCP error -32602: Input validation error: Invalid arguments for tool render: x").code, "input");
@@ -629,4 +638,259 @@ test("the command prints usage for anything but mcp and --version", () => {
   const help = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", cli], { encoding: "utf8" });
   assert.equal(help.status, 0);
   assert.match(help.stderr, /Usage: motionmockups mcp/);
+});
+
+// ---- connect_account and account, against a stand-in site on loopback ----
+
+async function onSite(t: TestContext, site: SiteOptions = {}, options: Parameters<typeof start>[1] = {}) {
+  const fake = await agentSite(t, { catalog: CATALOG, ...site });
+  const data = options.data ?? temp(t, "mm-server-data-");
+  const logged: string[] = [];
+  const started = await start(t, { fetch: globalThis.fetch, origin: fake.origin, data, log: (l) => logged.push(l), ...options });
+  return { ...started, site: fake, data, logged };
+}
+
+const PRO_ACCOUNT = { signedIn: true, tier: "pro", label: "Agent on 20 November 2026" };
+
+test("connect_account gives the link and code at once; wait returns once approved, and account says Pro", async (t) => {
+  const { client, site, data } = await onSite(t, { polls: [pending, pending, approved()], status: statusFor(true) });
+  const begun = await client.callTool({ name: "connect_account", arguments: {} });
+  assert.notEqual(begun.isError, true, JSON.stringify(structured(begun)));
+  const first = structured(begun);
+  assert.equal(first.userCode, USER_CODE);
+  assert.equal(first.url, `${site.origin.origin}/connect?code=${USER_CODE}`);
+  assert.equal(first.waiting, true);
+  assert.equal(first.opened, undefined, "no browser unless asked");
+  assert.match(first.note, /Render with your Pro plates\. It cannot change your account, billing, projects or saved recordings\./);
+  assert.match(first.note, /wait: true/);
+  assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false, "nothing saved before approval");
+
+  const waited = await client.callTool({ name: "connect_account", arguments: { wait: true } });
+  assert.notEqual(waited.isError, true, JSON.stringify(structured(waited)));
+  assert.deepEqual({ ...structured(waited), note: undefined }, { connected: true, ...PRO_ACCOUNT, note: undefined });
+  assert.ok(fs.existsSync(path.join(data, TOKEN_FILE)));
+
+  const account = structured(await client.callTool({ name: "account", arguments: {} }));
+  assert.deepEqual({ ...account, note: undefined }, { ...PRO_ACCOUNT, note: undefined });
+  assert.match(account.note, /clean/);
+  // A second connect while connected says so, and starts nothing.
+  const again = structured(await client.callTool({ name: "connect_account", arguments: {} }));
+  assert.equal(again.connected, true);
+  assert.match(again.note, /disconnect: true/);
+  assert.equal(site.seen.filter((s) => s.path === "/api/agent/connect/start").length, 1);
+});
+
+test("connect_account with open: true opens the link once, with fixed arguments", async (t) => {
+  const runs: { command: string; args: string[] }[] = [];
+  const { client, site } = await onSite(t, {}, { openBrowser: (command, args) => runs.push({ command, args }) });
+  const result = structured(await client.callTool({ name: "connect_account", arguments: { open: true } }));
+  assert.equal(result.opened, true);
+  assert.equal(runs.length, 1);
+  assert.equal(runs[0]!.args.at(-1), `${site.origin.origin}/connect?code=${USER_CODE}`);
+});
+
+test("connect_account: a second wait at the same time is refused as busy; a second start gives the same code", async (t) => {
+  const { client, site } = await onSite(t, { polls: [pending, pending, pending, pending, approved()] });
+  const a = structured(await client.callTool({ name: "connect_account", arguments: {} }));
+  const b = structured(await client.callTool({ name: "connect_account", arguments: {} }));
+  assert.equal(a.userCode, b.userCode);
+  assert.equal(site.seen.filter((s) => s.path === "/api/agent/connect/start").length, 1);
+  const first = client.callTool({ name: "connect_account", arguments: { wait: true } });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const second = await client.callTool({ name: "connect_account", arguments: { wait: true } });
+  assert.equal(second.isError, true);
+  assert.equal(structured(second).problems[0].code, "busy");
+  assert.notEqual((await first).isError, true);
+});
+
+test("connect_account: a declined sign-in is a sign-in refusal naming connect_account", async (t) => {
+  const { client, data } = await onSite(t, { polls: [pending, denied] });
+  await client.callTool({ name: "connect_account", arguments: {} });
+  const result = await client.callTool({ name: "connect_account", arguments: { wait: true } });
+  assert.equal(result.isError, true);
+  assert.equal(structured(result).problems[0].code, "sign-in");
+  assert.match(structured(result).problems[0].fix, /connect_account/);
+  assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
+});
+
+test("connect_account: cancelling the wait ends the sign-in", async (t) => {
+  const { client, site } = await onSite(t, { polls: [pending] });
+  await client.callTool({ name: "connect_account", arguments: {} });
+  const controller = new AbortController();
+  const waiting = client.callTool({ name: "connect_account", arguments: { wait: true } }, undefined, { signal: controller.signal });
+  waiting.catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  controller.abort("the person stopped it");
+  await assert.rejects(waiting);
+  // A poll already on the wire when the cancel came may still land; none is sent after it.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const polls = site.polls().length;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(site.polls().length, polls, "no poll after the cancel");
+  const after = await client.callTool({ name: "connect_account", arguments: { wait: true } });
+  assert.equal(after.isError, true);
+  assert.match(structured(after).problems[0].message, /No sign-in is waiting/);
+});
+
+test("connect_account: wait reports progress with the code, and stopping the server ends the sign-in", async (t) => {
+  const { client, site, stop } = await onSite(t, { polls: [pending] });
+  await client.callTool({ name: "connect_account", arguments: {} });
+  const seen: any[] = [];
+  const waiting = client.callTool({ name: "connect_account", arguments: { wait: true } }, undefined, { onprogress: (p) => seen.push(p) });
+  waiting.catch(() => {});
+  for (let i = 0; i < 100 && seen.length < 3; i++) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(seen.length >= 3, `${seen.length} progress reports`);
+  assert.ok(seen.every((p) => p.message.includes(USER_CODE)));
+  await stop();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const polls = site.polls().length;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(site.polls().length, polls);
+});
+
+test("connect_account disconnect deletes the saved token and says where to revoke it", async (t) => {
+  const { client, site, data } = await onSite(t);
+  await writeToken(data, site.origin, TOKEN);
+  const result = structured(await client.callTool({ name: "connect_account", arguments: { disconnect: true } }));
+  assert.equal(result.removed, true);
+  assert.equal(result.tier, "free");
+  assert.match(result.note, /Connected agents/);
+  assert.match(result.note, /Revoke/);
+  assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
+  const none = structured(await client.callTool({ name: "connect_account", arguments: { disconnect: true } }));
+  assert.equal(none.removed, false);
+  const mixed = await client.callTool({ name: "connect_account", arguments: { disconnect: true, wait: true } });
+  assert.equal(mixed.isError, true);
+  assert.equal(structured(mixed).problems[0].code, "input");
+  const unknown = await client.callTool({ name: "connect_account", arguments: { token: TOKEN } });
+  assert.equal(unknown.isError, true);
+});
+
+test("account: the site's 401 deletes the saved token and says to connect again", async (t) => {
+  const { client, site, data } = await onSite(t, {
+    status: () => ({ status: 401, body: { error: "This agent is no longer connected. Connect it again." } }),
+  });
+  await writeToken(data, site.origin, TOKEN);
+  const result = await client.callTool({ name: "account", arguments: {} });
+  assert.equal(result.isError, true);
+  assert.equal(structured(result).problems[0].code, "sign-in");
+  assert.match(structured(result).problems[0].fix, /connect_account/);
+  assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
+  // Signed out from then on.
+  assert.equal(structured(await client.callTool({ name: "account", arguments: {} })).signedIn, false);
+});
+
+test("account: a damaged token file or one for another origin is refused, and nothing is sent", async (t) => {
+  const { client, site, data } = await onSite(t);
+  fs.mkdirSync(data, { recursive: true });
+  fs.writeFileSync(path.join(data, TOKEN_FILE), "{ damaged");
+  const damaged = await client.callTool({ name: "account", arguments: {} });
+  assert.equal(damaged.isError, true);
+  assert.equal(structured(damaged).problems[0].code, "sign-in");
+  assert.match(structured(damaged).problems[0].fix, /connect_account/);
+  await writeToken(data, new URL("https://motionmockups.com"), TOKEN);
+  const other = await client.callTool({ name: "account", arguments: {} });
+  assert.equal(other.isError, true);
+  assert.match(structured(other).problems[0].message, /https:\/\/motionmockups\.com/);
+  // A render refuses too, rather than sending it elsewhere or quietly rendering free.
+  const project = temp(t, "mm-proj-");
+  const { client: renderer, calls, data: renderData, site: renderSite } = await onSite(t, {}, { env: { MOTIONMOCKUPS_FOLDERS: project } });
+  await writeToken(renderData, new URL("https://motionmockups.com"), TOKEN);
+  const render = await renderer.callTool({ name: "render", arguments: { plan: PLAN } });
+  assert.equal(render.isError, true);
+  assert.equal(structured(render).problems[0].code, "sign-in");
+  assert.equal(calls.length, 0);
+  for (const s of [site, renderSite]) assert.equal(s.seen.filter((x) => x.path.startsWith("/api/")).length, 0, "the token went nowhere");
+});
+
+test("render picks the tier by the account's status, once per render", async (t) => {
+  const project = temp(t, "mm-proj-");
+  const env = { MOTIONMOCKUPS_FOLDERS: project };
+  {
+    // No saved token: free, and the site is not asked.
+    const { client, calls, site } = await onSite(t, {}, { env });
+    assert.notEqual((await client.callTool({ name: "render", arguments: { plan: PLAN } })).isError, true);
+    assert.equal(calls[0]!.context.pro, undefined);
+    assert.equal(site.seen.filter((s) => s.path === "/api/agent/status").length, 0);
+  }
+  {
+    // Pro: the token goes to the session.
+    const { client, calls, site, data } = await onSite(t, { status: statusFor(true) }, { env });
+    await writeToken(data, site.origin, TOKEN);
+    assert.notEqual((await client.callTool({ name: "still", arguments: { plan: PLAN, seconds: 1, format: "png" } })).isError, true);
+    assert.deepEqual(calls[0]!.context.pro, { accessToken: TOKEN });
+    assert.equal(site.seen.filter((s) => s.path === "/api/agent/status").length, 1);
+  }
+  {
+    // Connected without Pro: free.
+    const { client, calls, site, data } = await onSite(t, { status: statusFor(false) }, { env });
+    await writeToken(data, site.origin, TOKEN);
+    assert.notEqual((await client.callTool({ name: "render", arguments: { plan: PLAN } })).isError, true);
+    assert.equal(calls[0]!.context.pro, undefined);
+  }
+  {
+    // The site cannot say: refused, nothing rendered, the token kept.
+    const { client, calls, site, data } = await onSite(t, { status: () => unavailable }, { env });
+    await writeToken(data, site.origin, TOKEN);
+    const result = await client.callTool({ name: "render", arguments: { plan: PLAN } });
+    assert.equal(result.isError, true);
+    assert.equal(structured(result).problems[0].code, "site");
+    assert.equal(calls.length, 0);
+    assert.ok(fs.existsSync(path.join(data, TOKEN_FILE)));
+  }
+});
+
+test("a Pro render the page refuses with sign-in deletes the saved token and names connect_account", async (t) => {
+  const project = temp(t, "mm-proj-");
+  const { client, site, data } = await onSite(
+    t,
+    { status: statusFor(true) },
+    {
+      env: { MOTIONMOCKUPS_FOLDERS: project },
+      renderOnce: async () => ({
+        ok: false,
+        problems: [{ code: "sign-in", message: "This agent is no longer connected. Connect it again.", fix: "Connect the account again.", source: "site" }],
+      }),
+    },
+  );
+  await writeToken(data, site.origin, TOKEN);
+  const result = await client.callTool({ name: "render", arguments: { plan: PLAN } });
+  assert.equal(result.isError, true);
+  const [problem] = structured(result).problems;
+  assert.equal(problem.code, "sign-in");
+  assert.match(problem.fix, /connect_account/);
+  assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
+});
+
+test("the token never appears in a tool result, a progress report, an error or stderr", async (t) => {
+  const project = temp(t, "mm-proj-");
+  const { client, sent, logged, data, site } = await onSite(
+    t,
+    { polls: [pending, approved()], status: statusFor(true) },
+    {
+      env: { MOTIONMOCKUPS_FOLDERS: project },
+      // A session that misbehaves: the token in its progress, its problem and a thrown error.
+      renderOnce: async (request, context) => {
+        const token = context.pro?.accessToken ?? "";
+        context.onProgress({ phase: "rendering", completed: 1, total: 2, message: `with ${token}` });
+        if (request.still) throw new Error(`thrown with ${token}`);
+        return { ok: false, problems: [{ code: "render", message: `failed with ${token}`, fix: `fix ${token}` }] };
+      },
+    },
+  );
+  await client.callTool({ name: "connect_account", arguments: {} });
+  await client.callTool({ name: "connect_account", arguments: { wait: true } }, undefined, { onprogress: () => {} });
+  assert.ok(fs.existsSync(path.join(data, TOKEN_FILE)), "connected");
+  await client.callTool({ name: "account", arguments: {} });
+  await client.callTool({ name: "render", arguments: { plan: PLAN } }, undefined, { onprogress: () => {} });
+  await client.callTool({ name: "still", arguments: { plan: PLAN, seconds: 1, format: "png" } });
+  await client.callTool({ name: "connect_account", arguments: {} });
+  // The token was used: the status was asked with it.
+  assert.ok(site.seen.some((s) => s.authorization === `Bearer ${TOKEN}`));
+  const everything = JSON.stringify(sent) + logged.join("\n");
+  assert.ok(sent.length > 6);
+  assert.ok(everything.includes("[agent token]"), "the misbehaving session's text was redacted");
+  assert.ok(!everything.includes(TOKEN), "the token is nowhere in what the server sent or logged");
+  assert.ok(!everything.includes(TOKEN.slice(4)), "nor its body");
+  assert.ok(!/mmd_/.test(everything), "nor the device code");
 });

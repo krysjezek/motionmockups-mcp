@@ -71,10 +71,17 @@ export interface SessionContext {
   onProgress: (p: Progress) => void;
   /** Starts Chrome; tests wrap it to watch what the session sends. Default launchChrome. */
   launch?: typeof launchChrome;
+  /**
+   * A Pro render: the agent token the page signs its plate links with. Handed to the page only
+   * inside the render call, over Chrome's control pipe; never on Chrome's command line, in its
+   * environment, in a URL or in a result. Without it, the render is a free preview.
+   */
+  pro?: { accessToken: string };
 }
 
 export const FREE_NOTICE =
   "Watermarked preview for evaluation only. Publishing it needs Motion Mockups Pro (https://motionmockups.com/pricing).";
+export const PRO_NOTICE = "Clean, full-quality render with Motion Mockups Pro.";
 
 const CONTRACT = 1;
 /** Any one CDP command. */
@@ -677,11 +684,11 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
       await inAgentPage(send("DOM.setFileInputFiles", { files: [again.value.path], objectId }));
     }
 
-    // 7. The render, as a free preview.
+    // 7. The render: Pro with the account's token, or a free preview.
     const call = {
       plan: request.plan,
       recording: !!recording,
-      tier: "free",
+      ...(context.pro ? { tier: "pro", accessToken: context.pro.accessToken } : { tier: "free" }),
       baseName,
       ...(request.still ? { seconds: request.still.seconds, format: request.still.format } : {}),
     };
@@ -802,7 +809,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
     pageReady = false;
     await sendAfter("Runtime.evaluate", { expression: "motionMockupsAgent.release()", awaitPromise: true }, RELEASE_MS).catch(() => {});
 
-    return { ok: true, value: { files: delivered, warnings: result.warnings, notice: FREE_NOTICE } };
+    return { ok: true, value: { files: delivered, warnings: result.warnings, notice: context.pro ? PRO_NOTICE : FREE_NOTICE } };
   } catch (error) {
     // A stop wins over whatever it interrupted: say why the render stopped. Files already saved stay, and are named.
     const problems = [asProblem(signal.aborted ? signal.reason : error)];

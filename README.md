@@ -35,7 +35,8 @@ It needs Node.js 20 or later and Google Chrome (Chromium on Linux).
 | `recording_spec` | What to record for a device: screen size, frame rate, file types. |
 | `render` | Renders a plan into a video, with the recording on the device screen. |
 | `still` | Renders one frame of a plan as a PNG or JPEG. |
-| `account` | Whether the adapter is signed in, and which plan its renders use. |
+| `account` | Whether the adapter is connected to a Motion Mockups account, and whether its renders are Pro (clean) or free (watermarked previews). |
+| `connect_account` | Connects your account, so renders are clean with Pro. See [Connect your account](#connect-your-account). |
 
 ## Settings
 
@@ -45,8 +46,55 @@ It needs Node.js 20 or later and Google Chrome (Chromium on Linux).
 | `MOTIONMOCKUPS_CHROME` | The Chrome to use, when it is not installed in the usual place. A path that is wrong is refused, never passed over. |
 | `MOTIONMOCKUPS_CHROME_MODE` | `headless` (the default) or `window`. See [Chrome mode](#chrome-mode). |
 | `MOTIONMOCKUPS_TIMEOUT_MINUTES` | How long one render may run, 1 minute or more. By default 20. |
-| `MOTIONMOCKUPS_DATA` | Where the adapter keeps its Chrome profile, its staging folder and the render lock. By default `%LOCALAPPDATA%\motionmockups` on Windows, `~/Library/Application Support/motionmockups` on macOS and `$XDG_DATA_HOME/motionmockups` or `~/.local/share/motionmockups` on Linux. An absolute folder; a relative one stops the server at start. The adapter creates these folders for you alone (mode 700 on macOS and Linux). |
+| `MOTIONMOCKUPS_DATA` | Where the adapter keeps its Chrome profile, its staging folder, the render lock and the [saved connection](#connect-your-account). By default `%LOCALAPPDATA%\motionmockups` on Windows, `~/Library/Application Support/motionmockups` on macOS and `$XDG_DATA_HOME/motionmockups` or `~/.local/share/motionmockups` on Linux. An absolute folder; a relative one stops the server at start. The adapter creates these folders for you alone (mode 700 on macOS and Linux). |
 | `MOTIONMOCKUPS_ORIGIN` | For testing the site only: a local preview on its own port (`http://localhost:<port>`, `http://127.0.0.1:<port>`; port 80 or no port is refused) or one of the site's Vercel previews in the owner's team (`https://motion-mockups-<9-character id>-krystofjezeks-projects.vercel.app` or `https://motion-mockups-app-git-<branch>-krystofjezeks-projects.vercel.app`). Anything else stops the server at start, so it never falls back to the public site by mistake. |
+
+## Connect your account
+
+Without an account, renders are free watermarked previews. To make clean,
+full-quality renders with Motion Mockups Pro, connect your account once per
+computer:
+
+1. Ask your agent to connect your Motion Mockups account. It calls
+   `connect_account`, which gives a link and a code such as `BCDF-2345`, and
+   shows them to you. The adapter opens nothing on its own; it opens the link
+   in your default browser only when you ask for that (`open: true`).
+2. Open the link in your usual browser and sign in to Motion Mockups. The
+   page, "Connect an agent", shows the code and what the agent can do:
+   "Render with your Pro plates. It cannot change your account, billing,
+   projects or saved recordings." Approve it if the code matches the one your
+   agent shows. If you didn't start this yourself, choose Deny.
+3. Your agent calls `connect_account` with `wait: true`, which returns once
+   you approve or decline, or after 10 minutes, when the code expires. It
+   reports progress while it waits, and cancelling it ends the sign-in.
+
+Only one sign-in runs at a time: asking again while one is pending gives the
+same code. Once connected, `account` says whether the account has Pro, and
+every `render` and `still` checks that once before it starts: Pro renders
+are clean, anything else is a free watermarked preview. When a saved
+connection cannot be used (damaged, for another site, no longer accepted, or
+the site cannot be reached to check it), the render is refused with the way
+out rather than quietly made as a watermarked preview.
+
+**The saved connection.** The adapter keeps a render-only agent token in one
+file, `agent-token` in its data folder (see `MOTIONMOCKUPS_DATA`), with the
+site it came from. It is written whole and then moved into place, readable by
+you alone (mode 600 on macOS and Linux; on Windows the data folder is in your
+own profile). The token is sent only to that site: a file saved for another
+site, after `MOTIONMOCKUPS_ORIGIN` changed, is refused, never sent. It never
+appears in a tool result, a progress report, an error or the adapter's log,
+and it reaches the site's agent page only inside Chrome's control pipe,
+never on Chrome's command line, in its environment or in a URL. A damaged
+file is refused, with how to connect again. A keychain is a later
+improvement.
+
+**Disconnecting.** `connect_account` with `disconnect: true` deletes the
+saved connection from this computer; renders are free previews again. The
+token stays valid on the account until you revoke it: on motionmockups.com,
+open Account, then Connected agents, and choose Revoke. It also stops
+working after 90 days without use, or when the account is deleted. Once the
+site no longer accepts it, the adapter deletes the file itself and says to
+connect again.
 
 ## What it reads and writes
 
@@ -137,9 +185,14 @@ which may let a window-mode Chrome take focus.
 
 ## Watermarked results
 
-Free renders carry a watermark, and every free result says:
+Free renders carry a watermark, whether or not an account is connected, and
+every free result says:
 
 > Watermarked preview for evaluation only. Publishing it needs Motion Mockups Pro (https://motionmockups.com/pricing).
+
+A render with a connected Pro account says:
+
+> Clean, full-quality render with Motion Mockups Pro.
 
 ## Known limits
 

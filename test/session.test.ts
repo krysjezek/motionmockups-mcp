@@ -17,6 +17,7 @@ import {
   checkResult,
   deliveredName,
   FREE_NOTICE,
+  PRO_NOTICE,
   pageProgress,
   progressForwarder,
   renderOnce,
@@ -439,6 +440,38 @@ test("the page is never given a user gesture but for the download click", withCh
   assert.equal(gestures.length, 1, JSON.stringify(gestures.map((g) => g.params.expression)));
   assert.match(gestures[0]!.params.expression, /a\.click\(\)/);
   assert.equal(fs.readFileSync(result.value.files[0]!.path, "utf8"), "a film");
+});
+
+test("a Pro render hands the page tier pro and the token inside the render call only; a free one neither", withChrome, async (t: TestContext) => {
+  const token = `mma_${"p".repeat(43)}`;
+  const script = agentScript(`return { ok: true, files: [file("film.mp4", "a film")], warnings: [JSON.stringify({ tier: call.tier, token: call.accessToken === ${JSON.stringify(token)}, keys: Object.keys(call).sort() })] };`);
+  for (const pro of [true, false]) {
+    const project = temp(t, "mm-session-project-");
+    const data = temp(t, "mm-session-data-");
+    const origin = await standIn(t, script);
+    const sent: Sent[] = [];
+    let launched: Parameters<typeof launchChrome>[0] | undefined;
+    const launch: typeof launchChrome = (options) => {
+      launched = options;
+      return recordingLaunch(sent)(options);
+    };
+    const result = await renderOnce(
+      { plan: PLAN, name: "film" },
+      context({ allowed: [project], data, origin, launch, ...(pro ? { pro: { accessToken: token } } : {}) }),
+    );
+    assert.ok(result.ok, JSON.stringify(result));
+    const seen = JSON.parse(result.value.warnings[0]!);
+    assert.equal(seen.tier, pro ? "pro" : "free");
+    assert.equal(seen.token, pro);
+    assert.deepEqual(seen.keys, pro ? ["accessToken", "baseName", "plan", "recording", "tier"] : ["baseName", "plan", "recording", "tier"]);
+    assert.equal(result.value.notice, pro ? PRO_NOTICE : NOTICE);
+    // Only the render call carries it: not Chrome's options, no other command, not the result.
+    assert.ok(!JSON.stringify(launched).includes(token));
+    const carrying = sent.filter((s) => JSON.stringify(s.params).includes(token));
+    assert.equal(carrying.length, pro ? 1 : 0);
+    if (pro) assert.match(carrying[0]!.params.expression, /^motionMockupsAgent\.render\(JSON\.parse\(/);
+    assert.ok(!JSON.stringify(result).includes(token));
+  }
 });
 
 test("page text is capped: warnings, a thrown error's first line and the saving file name", withChrome, async (t: TestContext) => {

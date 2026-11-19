@@ -1,5 +1,5 @@
-// The MCP server: five tools over the site's catalog and one render at a time in the
-// person's Chrome. Every refusal is a tool result with `isError: true` and `{ problems }`,
+// The MCP server: six tools over the site's catalog, the person's account and one render at
+// a time in the person's Chrome. Every refusal is a tool result with `isError: true` and `{ problems }`,
 // never a thrown error, so the agent always gets a `fix` to act on.
 //
 // Tool inputs are strict: an object with a field the tool does not document is refused
@@ -17,8 +17,10 @@ import {
 import { z } from "zod";
 
 import { catalogSource, CATALOG_TIMEOUT_MS, serverInstructions, type AgentCatalog } from "./catalog.ts";
+import { connectFlows, currentAccount, openInBrowser, type Account, type Launcher } from "./connect.ts";
 import { allowedFolders, type Checked, type Problem } from "./folders.ts";
 import type { Progress, Rendered, RenderRequest, SessionContext } from "./session.ts";
+import { clearToken, redact } from "./token.ts";
 
 export type ChromeMode = SessionContext["chromeMode"];
 
@@ -47,6 +49,10 @@ export interface ServerDeps {
   version: string;
   /** One line for stderr; stdout carries only the protocol. */
   log: (line: string) => void;
+  /** Opens the sign-in link when connect_account is asked to; tests record it instead. */
+  openBrowser?: Launcher;
+  /** Tests run connect_account's clock faster (see connectFlows). Default 1. */
+  connectTimeScale?: number;
 }
 
 /** `MOTIONMOCKUPS_TIMEOUT_MINUTES` and `MOTIONMOCKUPS_CHROME_MODE`, read strictly. */
@@ -153,13 +159,27 @@ const stillInput = z
   })
   .strict();
 const accountInput = z.object({}).strict();
+const connectInput = z
+  .object({
+    wait: z
+      .boolean()
+      .optional()
+      .describe("Wait for the person to approve the code the previous call gave; returns once they approve or decline, within 10 minutes."),
+    open: z.boolean().optional().describe("Also open the link in the person's default browser. Only when the person asked for that."),
+    disconnect: z.boolean().optional().describe("Delete the saved connection from this computer; renders are free previews again."),
+  })
+  .strict();
 
 // ---- Results ----
 
-const answer = (value: Record<string, unknown>): CallToolResult => ({
-  content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
-  structuredContent: value,
-});
+/**
+ * Every result passes here. Any agent token in it is replaced (src/token.ts redact), whatever
+ * put it there: the last guard, behind code that never puts one in.
+ */
+const answer = (raw: Record<string, unknown>): CallToolResult => {
+  const text = redact(JSON.stringify(raw, null, 2));
+  return { content: [{ type: "text", text }], structuredContent: JSON.parse(text) };
+};
 
 const refused = (problems: Problem[], saved?: { path: string; bytes: number }[]): CallToolResult => {
   const value: Record<string, unknown> = saved?.length ? { problems, saved } : { problems };
@@ -172,7 +192,7 @@ const unexpected = (error: unknown): Problem => ({
   fix: "Try again. If it keeps failing, report it at https://motionmockups.com/contact.",
 });
 
-export const TOOL_NAMES = ["list_scenes", "recording_spec", "render", "still", "account"] as const;
+export const TOOL_NAMES = ["list_scenes", "recording_spec", "render", "still", "account", "connect_account"] as const;
 
 /** An error the SDK gives as a tool result, as a problem with a way out. */
 export function sdkProblem(message: string): Problem {
@@ -194,8 +214,28 @@ const rootsProblem = (detail: string): Problem => ({
     "or to set MOTIONMOCKUPS_FOLDERS in this MCP server's settings to the project folder.",
 });
 
+const PRICING = "https://motionmockups.com/pricing";
 const ACCOUNT_NOTE =
-  "Not signed in. Renders are free watermarked previews, for evaluation only. Signing in for clean output with Motion Mockups Pro is coming to this adapter.";
+  "Not connected to an account. Renders are free watermarked previews, for evaluation only. For clean output with Motion Mockups Pro, call connect_account to connect the person's account.";
+
+/** What the account tool says of a connected account. */
+const connectedAnswer = (account: Extract<Account, { connected: true }>) => ({
+  signedIn: true,
+  tier: account.pro ? "pro" : "free",
+  label: account.label,
+  note: account.pro
+    ? `Connected as "${account.label}" with Motion Mockups Pro: renders are clean and full quality.`
+    : `Connected as "${account.label}", without Pro: renders are free watermarked previews, for evaluation only. Clean output needs Motion Mockups Pro (${PRICING}).`,
+});
+
+const REVOKE =
+  "Its access stays on the account until it is revoked: on motionmockups.com, open Account, then Connected agents, and choose Revoke.";
+
+const cancelledProblem = (what: string): Problem => ({
+  code: "cancelled",
+  message: `The ${what} was cancelled.`,
+  fix: "Nothing to undo. Send the request again when it is wanted.",
+});
 
 /** A progress report as one line for the client. */
 function progressText(p: Progress): string {
@@ -213,8 +253,17 @@ export interface AdapterServer {
 
 /** The server with its instructions from the catalog (fetched first, within 5 s). */
 export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
+  // Nothing reaches stderr with an agent token in it either.
+  const log = (line: string) => deps.log(redact(line));
   const catalog = catalogSource(deps.origin, deps.fetch, CATALOG_TIMEOUT_MS);
-  const instructions = serverInstructions(await catalog.get(), deps.log);
+  const instructions = serverInstructions(await catalog.get(), log);
+  const flows = connectFlows({ origin: deps.origin, data: deps.data, fetch: deps.fetch, timeScale: deps.connectTimeScale });
+  /** The saved connection and its status; a cancel while asking is a `cancelled` refusal. */
+  const account = (signal: AbortSignal): Promise<Checked<Account>> =>
+    currentAccount(deps.origin, deps.data, deps.fetch, signal).catch((error): Checked<Account> => {
+      if (signal.aborted) return { ok: false, problems: [cancelledProblem("request")] };
+      return { ok: false, problems: [unexpected(error)] };
+    });
 
   const server = new McpServer({ name: "motionmockups", version: deps.version }, { instructions, capabilities: { tools: {} } });
   // The SDK answers an input its schema refuses, an unknown tool or a handler's throw with a
@@ -233,7 +282,7 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
       .then((r): Checked<string[]> => ({ ok: true, value: r.roots.map((root) => root.uri) }))
       .catch((error): Checked<string[]> => {
         const detail = String((error as Error)?.message ?? error);
-        deps.log(`motionmockups: the client's roots could not be read (${detail}).`);
+        log(`motionmockups: the client's roots could not be read (${detail}).`);
         // Asked again on the next render.
         if (roots === reading) roots = undefined;
         // Never MOTIONMOCKUPS_FOLDERS alone in their place: the files would land outside the project.
@@ -274,13 +323,21 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
         if (token === undefined) return;
         step += 1;
         extra
-          .sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: step, message: progressText(p) } })
+          .sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: step, message: redact(progressText(p)) } })
           .catch(() => {});
       };
       let result: Rendered;
+      let pro = false;
       try {
         const folders = await allowed();
         if (!folders.ok) return refused(folders.problems);
+        // The account, once per render: Pro with its token when the site says so, else free.
+        // A saved connection that is damaged, for another site or no longer valid refuses the
+        // render rather than quietly making a watermarked one; the refusal says how to go on.
+        const checked = await account(controller.signal);
+        if (!checked.ok) return refused(checked.problems);
+        const now = checked.value;
+        pro = now.connected && now.pro;
         result = await deps.renderOnce(request, {
           origin: deps.origin,
           allowed: folders.value,
@@ -289,9 +346,25 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
           signal: controller.signal,
           timeoutMs: deps.timeoutMs,
           onProgress,
+          ...(now.connected && now.pro ? { pro: { accessToken: now.token } } : {}),
         });
       } catch (error) {
         result = { ok: false, problems: [unexpected(error)] };
+      }
+      // The page could not sign its plates with the token: it no longer works (revoked, idle
+      // or the account deleted). The saved connection goes, so the next render is free.
+      if (!result.ok && pro && result.problems.some((p) => p.code === "sign-in")) {
+        await clearToken(deps.data).catch(() => {});
+        const problems = result.problems.map((p): Problem =>
+          p.code === "sign-in"
+            ? {
+                code: "sign-in",
+                message: `${p.message} The saved connection on this computer was deleted.`,
+                fix: "Call connect_account to connect the account again, then send the request again. Until then renders are free watermarked previews.",
+              }
+            : p,
+        );
+        result = result.saved ? { ok: false, problems, saved: result.saved } : { ok: false, problems };
       }
       return result.ok ? answer({ ...result.value }) : refused(result.problems, result.saved);
     })();
@@ -416,17 +489,100 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   server.registerTool(
     "account",
     {
-      description: "Whether this adapter is signed in, and which plan its renders use.",
+      description:
+        "Whether this adapter is connected to a Motion Mockups account, and whether its renders are Pro (clean) or free (watermarked previews).",
       inputSchema: accountInput,
-      annotations: { readOnlyHint: true, openWorldHint: false },
+      annotations: { readOnlyHint: true, openWorldHint: true },
     },
-    () => answer({ signedIn: false, tier: "free", note: ACCOUNT_NOTE }),
+    async (_args, extra) => {
+      const checked = await account(extra.signal);
+      if (!checked.ok) return refused(checked.problems);
+      return answer(checked.value.connected ? connectedAnswer(checked.value) : { signedIn: false, tier: "free", note: ACCOUNT_NOTE });
+    },
+  );
+
+  server.registerTool(
+    "connect_account",
+    {
+      description:
+        "Connect the person's Motion Mockups account, for clean Pro renders. Gives a link and code to show the person; then call again with wait: true until they approve. disconnect: true deletes the saved connection.",
+      inputSchema: connectInput,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+    },
+    async ({ wait, open, disconnect }, extra) => {
+      if (disconnect) {
+        if (wait || open)
+          return refused([{ code: "input", message: "disconnect cannot be combined with wait or open.", fix: "Send disconnect: true alone." }]);
+        await flows.end();
+        const removed = await clearToken(deps.data);
+        return answer({
+          signedIn: false,
+          tier: "free",
+          removed,
+          note: removed
+            ? `The saved connection was deleted from this computer; renders are free watermarked previews. ${REVOKE}`
+            : "There was no saved connection on this computer; renders are free watermarked previews.",
+        });
+      }
+
+      if (wait) {
+        if (open) return refused([{ code: "input", message: "open cannot be combined with wait.", fix: "Send open with the first call, without wait." }]);
+        const token = extra._meta?.progressToken;
+        let step = 0;
+        const outcome = await flows.wait(extra.signal, (message) => {
+          if (token === undefined) return;
+          step += 1;
+          extra
+            .sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: step, message: redact(message) } })
+            .catch(() => {});
+        });
+        if (!outcome.ok) return refused(outcome.problems);
+        const now = await account(extra.signal);
+        if (now.ok && now.value.connected) return answer({ connected: true, ...connectedAnswer(now.value) });
+        return answer({
+          connected: true,
+          signedIn: true,
+          label: outcome.value.label,
+          note: `Connected as "${outcome.value.label}". Call account to see whether renders are Pro.`,
+        });
+      }
+
+      // Already connected on this site: said so, never started over (disconnect first to switch).
+      const now = await account(extra.signal);
+      if (now.ok && now.value.connected) {
+        const connected = connectedAnswer(now.value);
+        return answer({
+          connected: true,
+          ...connected,
+          note: `${connected.note} To connect another account, call connect_account with disconnect: true first.`,
+        });
+      }
+      const begun = await flows.begin();
+      if (!begun.ok) return refused(begun.problems);
+      const { userCode, url, expiresIn } = begun.value;
+      if (open) {
+        const opened = openInBrowser(url, deps.origin, deps.openBrowser);
+        if (!opened.ok) return refused(opened.problems);
+      }
+      return answer({
+        userCode,
+        url,
+        waiting: true,
+        expiresInMinutes: Math.max(1, Math.round(expiresIn / 60)),
+        ...(open ? { opened: true } : {}),
+        note:
+          "Show the person this link and code. They open the link, sign in to Motion Mockups and approve if the code matches. " +
+          'The page says what the agent can do: "Render with your Pro plates. It cannot change your account, billing, projects or saved recordings." ' +
+          "Then call connect_account with wait: true; it returns once they approve or decline.",
+      });
+    },
   );
 
   return {
     server,
     async stop() {
       stopping = true;
+      await flows.stop();
       const waits = [...running].map((entry) => {
         entry.controller.abort();
         return entry.done;
