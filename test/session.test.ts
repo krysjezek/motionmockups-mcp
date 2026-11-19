@@ -274,6 +274,24 @@ test(
   },
 );
 
+test("existing staging and Chrome profile folders are tightened to mode 0o700", { skip: windows ? "file modes are POSIX" : !found.ok ? "no Google Chrome on this machine" : false }, async (t: TestContext) => {
+  const project = temp(t, "mm-session-project-");
+  const data = temp(t, "mm-session-data-");
+  const folders = [data, path.join(data, "staging"), path.join(data, "chrome-profile")];
+  for (const folder of folders) {
+    fs.mkdirSync(folder, { recursive: true });
+    fs.chmodSync(folder, 0o755);
+  }
+  const closed = await new Promise<number>((resolve) => {
+    const server = net.createServer().listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as net.AddressInfo;
+      server.close(() => resolve(port));
+    });
+  });
+  await renderOnce({ plan: PLAN }, context({ allowed: [project], data, origin: new URL(`http://127.0.0.1:${closed}`) }));
+  for (const folder of folders) assert.equal(fs.statSync(folder).mode & 0o777, 0o700, folder);
+});
+
 test("staging and the Chrome profile are created for the person alone (mode 0o700)", { skip: found.ok ? false : "no Google Chrome on this machine" }, async (t: TestContext) => {
   const project = temp(t, "mm-session-project-");
   const data = path.join(temp(t, "mm-session-data-"), "fresh");
@@ -498,12 +516,95 @@ test("progress: at most one report per 250 ms, phase changes and ends included; 
   let at = 0;
   const flood = progressForwarder((p) => many.push(p), () => at);
   for (let i = 0; i < 5000; i++) {
-    at += 300;
+    at += 10_000;
     flood({ phase: "rendering", completed: i, total: 5000 });
   }
   flood({ phase: "saving", completed: 1, total: 1 }, true);
   assert.equal(many.length, 2000);
   assert.equal(many.at(-1)!.phase, "saving", "the final report still goes after the cap");
+});
+
+test("progress on a long render slows down but never stops: a 20-minute render reports at least every 10 s, 2,000 at most", () => {
+  let at = 0;
+  const times: number[] = [];
+  const report = progressForwarder(() => times.push(at), () => at);
+  // The page reports every 50 ms for 20 minutes.
+  for (; at <= 20 * 60_000; at += 50) report({ phase: "rendering", completed: at, total: 20 * 60_000 });
+  const gaps = times.slice(1).map((t, i) => t - times[i]!);
+  assert.ok(times.at(-1)! >= 20 * 60_000 - 10_000, `the last report came at ${times.at(-1)} ms`);
+  assert.ok(Math.max(...gaps) <= 10_000, `longest silence ${Math.max(...gaps)} ms`);
+  assert.ok(gaps.slice(0, 999).every((g) => g >= 250), "the first 1,000 at most every 250 ms");
+  assert.ok(gaps.slice(999).every((g) => g >= 2_000), "then at most every 2 s");
+  assert.ok(times.length <= 2_000);
+  // The bound: however long the render, 2,000 notifications at most, the final report included.
+  let later = 0;
+  const flood: number[] = [];
+  const all = progressForwarder(() => flood.push(later), () => later);
+  for (; later <= 10 * 60 * 60_000; later += 1_000) all({ phase: "rendering", completed: 1, total: 2 });
+  all({ phase: "saving", completed: 1, total: 1 }, true);
+  assert.equal(flood.length, 2_000);
+});
+
+test("the page's contract version reaches the agent capped", { skip: found.ok ? false : "no Google Chrome on this machine" }, async (t: TestContext) => {
+  const { result } = await standInRender(t, `globalThis.motionMockupsAgent = { version: "v".repeat(100000) };`);
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.problems[0]!.code, "contract");
+  assert.ok(result.problems[0]!.message.length < 300, `${result.problems[0]!.message.length} characters`);
+});
+
+test("a page that navigates after the /agent check never gets the render or the recording", { skip: found.ok ? false : "no Google Chrome on this machine" }, async (t: TestContext) => {
+  // The same /agent page, loaded again with ?second after the adapter checked the first one:
+  // render() there says so. The navigation is made from the test, either as the check's answer
+  // arrives, or after the check, just before the next command bound to the checked page (the
+  // #agent-recording lookup, or the render call) is sent.
+  const script = agentScript(
+    `return location.search === "?second"
+      ? { ok: false, problems: [{ code: "second-page", message: "render() ran in the page loaded after the check", fix: "-" }] }
+      : { ok: true, files: [file("film.mp4", "a film")], warnings: [] };`,
+  );
+  for (const [recording, when] of [
+    [false, "check"],
+    [true, "check"],
+    [false, "after"],
+    [true, "after"],
+  ] as const) {
+    const project = temp(t, "mm-session-project-");
+    const data = temp(t, "mm-session-data-");
+    const origin = await standIn(t, script);
+    const sent: Sent[] = [];
+    let navigated = false;
+    const launch: typeof launchChrome = async (options) => {
+      const chrome = await launchChrome(options);
+      const send = chrome.cdp.send.bind(chrome.cdp);
+      chrome.cdp.send = (async (method: string, params?: object, sessionId?: string) => {
+        sent.push({ method, params: params ?? {} });
+        const navigate = async () => {
+          navigated = true;
+          await send("Page.navigate", { url: new URL("/agent?second", origin).href }, sessionId);
+          await new Promise((resolve) => setTimeout(resolve, 300));
+        };
+        const bound = method === "Runtime.evaluate" && (params as { uniqueContextId?: string })?.uniqueContextId !== undefined;
+        const before = method === "Runtime.evaluate" && /getElementById\("agent-recording"\)|motionMockupsAgent\.render\(/.test((params as any)?.expression ?? "");
+        if (when === "after" && !navigated && (bound || before)) await navigate();
+        const answer = await send(method, params, sessionId);
+        if (when === "check" && method === "Page.getFrameTree" && !navigated) await navigate();
+        return answer;
+      }) as typeof chrome.cdp.send;
+      return chrome;
+    };
+    if (recording) fs.writeFileSync(path.join(project, "clip.mp4"), Buffer.from("000000186674797069736f6d0000020069736f6d69736f32", "hex"));
+    const result = await renderOnce(
+      { plan: PLAN, name: "film", ...(recording ? { recording: "clip.mp4" } : {}) },
+      context({ allowed: [project], data, origin, launch }),
+    );
+    assert.ok(navigated, "the check ran");
+    assert.equal(result.ok, false, `recording ${recording}, ${when}: ${JSON.stringify(result)}`);
+    if (result.ok) continue;
+    assert.equal(result.problems[0]!.code, "site", `recording ${recording}, ${when}: ${JSON.stringify(result.problems)}`);
+    assert.ok(!sent.some((s) => s.method === "DOM.setFileInputFiles"), "the recording was not handed over");
+    assert.ok(!fs.existsSync(path.join(project, "motion-mockups", "film.mp4")));
+  }
 });
 
 test("the recording is handed over, and the render started, only on the configured origin's /agent", withChrome, async (t: TestContext) => {

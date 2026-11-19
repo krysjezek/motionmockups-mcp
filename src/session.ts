@@ -14,7 +14,7 @@
 
 import { once } from "node:events";
 import { createReadStream } from "node:fs";
-import { mkdir, readdir, rm, stat } from "node:fs/promises";
+import { chmod, mkdir, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -93,8 +93,18 @@ const RELEASE_MS = 10_000;
 const DOWNLOAD_START_MS = 15_000;
 const DOWNLOAD_STALL_MS = 60_000;
 const WAIT_REPORT_MS = 5_000;
-const PROGRESS_MS = 250;
-/** Progress notifications one render forwards at most, the final one included. */
+/**
+ * Progress pacing: one report per 250 ms for the first 1,000, then one per 2 s up to 1,500,
+ * then one per 10 s, and 2,000 at most per render, the final one included. A long render keeps
+ * reporting (a client may keep the request alive on them) and is never silent for more than
+ * 10 s while the page reports, for at least 250 s + 500 x 2 s + 499 x 10 s = 104 minutes,
+ * far past the default 20-minute timeout.
+ */
+const PROGRESS_STEPS = [
+  { until: 1_000, ms: 250 },
+  { until: 1_500, ms: 2_000 },
+  { until: Infinity, ms: 10_000 },
+];
 const PROGRESS_CAP = 2_000;
 /** What the page's words may take up: they reach the agent's context. */
 const WARNINGS_MAX = 20;
@@ -389,7 +399,7 @@ export function checkResult(value: unknown, origin: URL): AgentResult {
 }
 
 /**
- * Progress, forwarded at most once every PROGRESS_MS whatever it says (a page changing phase
+ * Progress, forwarded at the pace PROGRESS_STEPS sets whatever it says (a page changing phase
  * or finishing one on every call is throttled too), and PROGRESS_CAP times per render at most.
  * The one `final` report always goes, once.
  */
@@ -403,7 +413,8 @@ export function progressForwarder(onProgress: (p: Progress) => void, now: () => 
       if (finished) return;
       finished = true;
     } else {
-      if (finished || forwarded >= PROGRESS_CAP - 1 || at - last < PROGRESS_MS) return;
+      const gap = PROGRESS_STEPS.find((step) => forwarded < step.until)!.ms;
+      if (finished || forwarded >= PROGRESS_CAP - 1 || at - last < gap) return;
       forwarded++;
     }
     last = at;
@@ -469,10 +480,16 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
   const stagedHere = new Set<string>();
   const delivered: Delivered["files"] = [];
   const unsubscribe: (() => void)[] = [];
+  /** Each frame's current page context (the default world), by frame id: its system-unique id. */
+  const pageContexts = new Map<string, { id: number; uniqueId: string }>();
+  /** The /agent page's context, taken when it was checked; the hand-off and the render run only in it. */
+  let agentContext: string | undefined;
   let launching: Promise<Chrome> | undefined;
   let chrome: Chrome | undefined;
   let cdp: Cdp | undefined;
   let sessionId = "";
+  /** The page's target id, which is also its main frame's id. */
+  let targetId = "";
   let pageReady = false;
   let rendering: Promise<unknown> | undefined;
   let renderSettled = false;
@@ -496,17 +513,47 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
    * `userGesture` says so: only the download click is given one, never a poll the page could
    * use to open windows, take the clipboard or go full screen.
    */
-  const evaluate = async (expression: string, options: { userGesture?: boolean } = {}): Promise<unknown> => {
-    const params = { expression, awaitPromise: true, returnByValue: true, ...(options.userGesture ? { userGesture: true } : {}) };
-    const result: any = await send("Runtime.evaluate", params, SEND_MS);
+  const evaluate = async (expression: string, options: { userGesture?: boolean; inAgentPage?: boolean } = {}): Promise<unknown> => {
+    const params = {
+      expression,
+      awaitPromise: true,
+      returnByValue: true,
+      ...(options.userGesture ? { userGesture: true } : {}),
+      ...(options.inAgentPage ? { uniqueContextId: agentContext } : {}),
+    };
+    const result: any = await (options.inAgentPage ? inAgentPage(send("Runtime.evaluate", params, SEND_MS)) : send("Runtime.evaluate", params, SEND_MS));
     if (result.exceptionDetails) throw pageThrew(result.exceptionDetails);
     return result.result?.value;
   };
-  /** Refuses with `site` unless the main frame is still the origin's /agent (asked of Chrome, not of the page). */
+  const leftPage = () =>
+    problemError(
+      "site",
+      "The agent page was replaced by another page after the adapter checked it; nothing more was handed to it.",
+      "Try the render again. If it keeps happening, report it at https://motionmockups.com/contact.",
+    );
+  /** A command bound to the checked page's context: the context being gone (a navigation since) is a `site` refusal. */
+  const inAgentPage = <T>(work: Promise<T>): Promise<T> =>
+    work.catch((error) => {
+      const e = error as { code?: string; message?: string };
+      if (e?.code === "cdp" && /context|object with given id/i.test(e.message ?? "")) throw leftPage();
+      throw error;
+    });
+  /**
+   * Refuses with `site` unless the main frame is still the origin's /agent (asked of Chrome, not
+   * of the page), and takes that page's context: what follows runs only in it, so a navigation
+   * after this check makes it fail rather than run in the new page. Checked again later, the
+   * context must be the same one.
+   */
   const onAgentPage = async () => {
-    const { frameTree } = await send<{ frameTree: { frame: { url: string } } }>("Page.getFrameTree");
+    // The context before and after the URL is read must be one and the same: then the URL is
+    // that context's document's, not a page that replaced it in between.
+    const before = pageContexts.get(targetId)?.uniqueId;
+    const { frameTree } = await send<{ frameTree: { frame: { id: string; url: string } } }>("Page.getFrameTree");
     const problem = agentPageProblem(frameTree.frame.url, context.origin);
     if (problem) throw problemError(problem.code, problem.message, problem.fix);
+    const after = frameTree.frame.id === targetId ? pageContexts.get(targetId)?.uniqueId : undefined;
+    if (!before || before !== after || (agentContext !== undefined && after !== agentContext)) throw leftPage();
+    agentContext = after;
   };
 
   try {
@@ -518,6 +565,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
     // 3. Chrome on the adapter's own profile.
     report({ phase: "starting", completed: 0, total: 1, message: "Opening Chrome." });
     await mkdir(staging, { recursive: true, mode: 0o700 });
+    if (process.platform !== "win32") await chmod(staging, 0o700); // an existing one too
     launching = (context.launch ?? launchChrome)({ executable: executable.value, profile, origin: context.origin, mode: context.chromeMode });
     try {
       chrome = await until(launching, signal, Infinity, () => new Error("unreachable"));
@@ -539,7 +587,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
     gone.catch(() => {});
     // No download goes anywhere until a file is saved (a window-mode Chrome would otherwise use ~/Downloads).
     await send("Browser.setDownloadBehavior", { behavior: "deny" }, SEND_MS, false);
-    ({ sessionId } = await until(openPage(cdp), signal, SEND_MS * 2, limited("Target.createTarget", SEND_MS * 2), [gone]));
+    ({ sessionId, targetId } = await until(openPage(cdp), signal, SEND_MS * 2, limited("Target.createTarget", SEND_MS * 2), [gone]));
 
     // 4. The progress bridge, before the page loads.
     unsubscribe.push(
@@ -547,6 +595,20 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
         if (from !== sessionId || params?.name !== BINDING) return;
         const p = pageProgress(params.payload);
         if (p) report(p);
+      }),
+    );
+    unsubscribe.push(
+      cdp.on("Runtime.executionContextCreated", (params, from) => {
+        const c = params?.context;
+        if (from !== sessionId || !c?.auxData?.isDefault || typeof c.auxData.frameId !== "string" || typeof c.uniqueId !== "string") return;
+        pageContexts.set(c.auxData.frameId, { id: c.id, uniqueId: c.uniqueId });
+      }),
+      cdp.on("Runtime.executionContextDestroyed", (params, from) => {
+        if (from !== sessionId) return;
+        for (const [frame, c] of pageContexts) if (c.id === params?.executionContextId) pageContexts.delete(frame);
+      }),
+      cdp.on("Runtime.executionContextsCleared", (_params, from) => {
+        if (from === sessionId) pageContexts.clear();
       }),
     );
     await send("Page.enable");
@@ -576,7 +638,8 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
         `(() => { const a = globalThis.motionMockupsAgent; return { state: document.readyState, version: a && typeof a === "object" ? a.version : undefined }; })()`,
       )) as { state?: string; version?: unknown } | undefined;
       if (seen?.version !== undefined) {
-        if (seen.version !== CONTRACT) throw contractProblem(`the page speaks contract ${JSON.stringify(seen.version)}, the adapter ${CONTRACT}.`);
+        if (seen.version !== CONTRACT)
+          throw contractProblem(`the page speaks contract ${capText(JSON.stringify(seen.version) ?? "", 100)}, the adapter ${CONTRACT}.`);
         break;
       }
       const now = performance.now();
@@ -595,9 +658,13 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
     // wait, the launch and the page load came between, and a folder on the path may have been
     // swapped for a link since.
     if (recording) {
-      const field = (await send("Runtime.evaluate", { expression: `document.getElementById("agent-recording")` })) as any;
+      await onAgentPage();
+      const field = (await inAgentPage(
+        send("Runtime.evaluate", { expression: `document.getElementById("agent-recording")`, uniqueContextId: agentContext }),
+      )) as any;
       const objectId = field?.result?.objectId;
       if (!objectId) throw contractProblem("the page has no #agent-recording.");
+      // The last step before the hand-off.
       const again = await readableRecording(request.recording!, context.allowed);
       if (!again.ok) return again;
       const same = again.value.path === recording && (await identity(again.value.path).catch(() => "")) === recordingId;
@@ -607,8 +674,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
           `${request.recording} changed while the render waited its turn: it is no longer the file that was checked.`,
           "Let the recording finish saving, then send the request again.",
         );
-      await onAgentPage();
-      await send("DOM.setFileInputFiles", { files: [again.value.path], objectId });
+      await inAgentPage(send("DOM.setFileInputFiles", { files: [again.value.path], objectId }));
     }
 
     // 7. The render, as a free preview.
@@ -628,7 +694,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
     await onAgentPage();
     // Parsed in the page, never pasted in as code: a plan is data.
     const expression = `motionMockupsAgent.${request.still ? "still" : "render"}(JSON.parse(${JSON.stringify(json)}))`;
-    rendering = cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, sessionId);
+    rendering = inAgentPage(cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true, uniqueContextId: agentContext }, sessionId));
     rendering.then(
       () => (renderSettled = true),
       () => (renderSettled = true),
@@ -687,7 +753,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
       await evaluate(
         `(() => { const a = document.createElement("a"); a.href = ${JSON.stringify(file.url)}; a.download = ${JSON.stringify(file.name)};` +
           ` document.body.append(a); a.click(); a.remove(); })()`,
-        { userGesture: true },
+        { userGesture: true, inAgentPage: true },
       );
       const guid = await waitFor(
         () => begun.get(file.url),

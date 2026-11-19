@@ -19,6 +19,15 @@ function tempFolder(t: { after: (fn: () => void) => void }): string {
 
 const lockOf = (folder: string) => path.join(folder, LOCK_NAME);
 
+test("an existing data folder is tightened to mode 0o700", { skip: process.platform === "win32" && "file modes are POSIX" }, async (t) => {
+  const data = path.join(tempFolder(t), "data");
+  fs.mkdirSync(data, { mode: 0o755 });
+  fs.chmodSync(data, 0o755);
+  const held = await acquireRenderLock(data);
+  await held.release();
+  assert.equal(fs.statSync(data).mode & 0o777, 0o700);
+});
+
 test("the data folder is created for the person alone (mode 0o700)", async (t) => {
   const parent = tempFolder(t);
   const data = path.join(parent, "data", "motionmockups");

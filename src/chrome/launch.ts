@@ -131,6 +131,8 @@ const startProblem = (detail: string, exitCode?: number | null): ChromeStartErro
 export async function launchChrome(options: ChromeOptions): Promise<Chrome> {
   // The profile holds the page's storage: the person's alone.
   fs.mkdirSync(options.profile, { recursive: true, mode: 0o700 });
+  if (process.platform !== "win32") fs.chmodSync(options.profile, 0o700); // an existing one too
+
   const child = spawn(options.executable, chromeArgs(options), {
     // fd 3 is Chrome's input, fd 4 its output.
     stdio: ["ignore", "ignore", "pipe", "pipe", "pipe"],

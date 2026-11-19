@@ -23,7 +23,7 @@
 
 import { randomUUID } from "node:crypto";
 import { readFileSync, unlinkSync } from "node:fs";
-import { mkdir, open, stat, unlink } from "node:fs/promises";
+import { chmod, mkdir, open, stat, unlink } from "node:fs/promises";
 import path from "node:path";
 
 import { problemError, type ProblemError } from "./chrome/cdp.ts";
@@ -312,6 +312,8 @@ export async function acquireRenderLock(folder: string, options: LockOptions = {
   try {
     // The person's alone: the lock, staging and Chrome profile live here.
     await mkdir(folder, { recursive: true, mode: 0o700 });
+    // An existing one too: the adapter owns it. (Windows has no such modes.)
+    if (process.platform !== "win32") await chmod(folder, 0o700);
   } catch (error) {
     throw lockProblem(folder, (error as Error).message);
   }
