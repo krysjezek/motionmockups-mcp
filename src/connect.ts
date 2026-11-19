@@ -2,11 +2,13 @@
 // the adapter asks the site for a code (`POST /api/agent/connect/start`), the person opens the
 // link in their own browser, signs in and approves the code, and the adapter, polling
 // `POST /api/agent/connect/poll`, receives a render-only agent token and saves it
-// (src/token.ts). `GET /api/agent/status` then says whether the account is Pro.
+// (src/token.ts). `GET /api/agent/status` then says whether the account is Pro, and
+// `POST /api/agent/disconnect` revokes the token when the adapter disconnects.
 //
 // Every request goes to the configured origin only, and no redirect is followed. The adapter
-// never opens a browser unless asked to; the link and code are in the tool result for the agent
-// to show. The token and the device code never leave this module but in requests to the origin
+// never opens a browser unless asked to (`open: true`, which the tool recommends: a link the
+// adapter opens itself is certainly its own); the link and code are in the tool result for the
+// agent to show. The token and the device code never leave this module but in requests to the origin
 // and, for the token, the file.
 
 import { execFile } from "node:child_process";
@@ -271,6 +273,41 @@ export async function currentAccount(origin: URL, data: string, fetchImpl: typeo
     return { ok: false, problems: [siteProblem(origin, what, `the site answered ${reply.status}${words ? ` (${words})` : ""}`)] };
   }
   return { ok: true, value: { connected: true, pro: b.pro, label: clean(b.label, LABEL_CHARS) || "this agent", token } };
+}
+
+export interface Disconnected {
+  /** The saved file was deleted (false: there was none). */
+  removed: boolean;
+  /** The site confirmed it revoked the token. */
+  revoked: boolean;
+  /** Why the site did not confirm, in words; never the token. */
+  detail?: string;
+}
+
+/**
+ * Disconnects this computer: the saved token for `origin` is sent once to
+ * `POST /api/agent/disconnect`, which revokes it on the account, and the file is then deleted
+ * whatever the site answered. A token saved for another origin is never sent, only deleted.
+ */
+export async function disconnectAccount(origin: URL, data: string, fetchImpl: typeof fetch, signal?: AbortSignal): Promise<Disconnected> {
+  const saved = await readToken(data, origin).catch((): Checked<string | null> => ({ ok: true, value: null }));
+  let revoked = false;
+  let detail: string | undefined;
+  if (!saved.ok) detail = "the saved connection could not be used, so it was not sent";
+  else if (saved.value !== null) {
+    try {
+      const reply = await call(origin, fetchImpl, "/api/agent/disconnect", { method: "POST", body: {}, bearer: saved.value }, signal);
+      revoked = reply.status === 200 && isObject(reply.body) && reply.body.status === "disconnected";
+      if (!revoked) {
+        const words = siteWords(reply.body);
+        detail = `the site answered ${reply.status}${words ? ` (${words})` : ""}`;
+      }
+    } catch (error) {
+      detail = signal?.aborted ? "the call was cancelled" : failure(error);
+    }
+  }
+  const removed = await clearToken(data).catch(() => false);
+  return { removed, revoked, ...(detail ? { detail } : {}) };
 }
 
 /** Runs a program with fixed arguments and no shell, without waiting for it. */

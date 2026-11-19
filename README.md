@@ -57,8 +57,11 @@ computer:
 
 1. Ask your agent to connect your Motion Mockups account. It calls
    `connect_account`, which gives a link and a code such as `BCDF-2345`, and
-   shows them to you. The adapter opens nothing on its own; it opens the link
-   in your default browser only when you ask for that (`open: true`).
+   shows them to you. The adapter opens nothing on its own. With
+   `open: true`, which is recommended, it opens the link in your default
+   browser: a link the adapter opens itself is certainly its own, while a
+   link an agent shows you could have come from instructions it read
+   elsewhere.
 2. Open the link in your usual browser and sign in to Motion Mockups. The
    page, "Connect an agent", shows the code and what the agent can do:
    "Render with your Pro plates. It cannot change your account, billing,
@@ -95,11 +98,15 @@ never on Chrome's command line, in its environment or in a URL. A damaged
 file is refused, with how to connect again. A keychain is a later
 improvement.
 
-**Disconnecting.** `connect_account` with `disconnect: true` deletes the
-saved connection from this computer; renders are free previews again. The
-token stays valid on the account until you revoke it: on motionmockups.com,
-open Account, then Connected agents, and choose Revoke. It also stops
-working after 90 days without use, or when the account is deleted. Once the
+**Disconnecting.** `connect_account` with `disconnect: true` sends the saved
+token once to the site, which revokes it on the account, and then deletes
+the saved connection from this computer, whatever the site answered;
+renders are free previews again. The result says whether the site confirmed
+the revoke. If it did not (the site could not be reached, for one), the
+token may still be live: revoke it on motionmockups.com, under Account, then
+Connected agents, Revoke. A token saved for another site is deleted, never
+sent. A token also stops working after 90 days without use, or when the
+account is deleted. Once the
 site no longer accepts it, the adapter deletes the file itself and says to
 connect again. When Pro ends, the connection stays and renders become free
 watermarked previews; renew Pro for clean renders again.

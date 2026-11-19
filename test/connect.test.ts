@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { connectFlows, currentAccount, openInBrowser, startConnect, type Launcher } from "../src/connect.ts";
+import { connectFlows, currentAccount, disconnectAccount, openInBrowser, startConnect, type Launcher } from "../src/connect.ts";
 import { readToken, TOKEN_FILE, writeToken } from "../src/token.ts";
 import {
   agentSite,
@@ -421,4 +421,63 @@ test("currentAccount: a token saved for another origin is never sent", async (t)
   assert.equal(account.ok, false);
   if (!account.ok) assert.equal(account.problems[0]!.code, "sign-in");
   assert.equal(site.seen.length, 0, "nothing was sent to this origin");
+});
+
+test("disconnectAccount: the site revokes the saved token with it as the bearer, then the file is deleted", async (t) => {
+  const data = temp(t, "mm-connect-");
+  const site = await agentSite(t);
+  await writeToken(data, site.origin, TOKEN);
+  const result = await disconnectAccount(site.origin, data, globalThis.fetch);
+  assert.deepEqual(result, { removed: true, revoked: true });
+  assert.equal(site.seen.length, 1);
+  assert.equal(site.seen[0]!.method, "POST");
+  assert.equal(site.seen[0]!.path, "/api/agent/disconnect");
+  assert.equal(site.seen[0]!.authorization, `Bearer ${TOKEN}`);
+  assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
+});
+
+test("disconnectAccount: a network failure, a refusal or a redirect still deletes the file and says the site did not confirm", async (t) => {
+  const elsewhere = await agentSite(t);
+  const answers = [
+    { status: 0, body: null, cut: true },
+    unavailable,
+    { status: 200, body: { status: "something else" } },
+    { status: 307, body: {}, headers: { location: `${elsewhere.origin.origin}/api/agent/disconnect` } },
+  ];
+  for (const answer of answers) {
+    const data = temp(t, "mm-connect-");
+    const site = await agentSite(t, { disconnect: () => answer });
+    await writeToken(data, site.origin, TOKEN);
+    const result = await disconnectAccount(site.origin, data, globalThis.fetch);
+    assert.equal(result.removed, true, JSON.stringify(answer));
+    assert.equal(result.revoked, false, JSON.stringify(answer));
+    assert.ok(result.detail, JSON.stringify(answer));
+    assert.doesNotMatch(result.detail!, /mma_/);
+    assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false, JSON.stringify(answer));
+  }
+  assert.deepEqual(elsewhere.seen, [], "the redirect was not followed");
+  // A site that cannot be reached at all.
+  const data = temp(t, "mm-connect-");
+  const origin = new URL("http://127.0.0.1:9");
+  await writeToken(data, origin, TOKEN);
+  const refused = (async () => {
+    throw new TypeError("fetch failed", { cause: { code: "ECONNREFUSED" } });
+  }) as unknown as typeof fetch;
+  const result = await disconnectAccount(origin, data, refused);
+  assert.deepEqual(result, { removed: true, revoked: false, detail: "the site could not be reached (ECONNREFUSED)" });
+  assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
+});
+
+test("disconnectAccount: no saved token sends nothing; one for another origin is deleted, never sent", async (t) => {
+  const site = await agentSite(t);
+  const none = temp(t, "mm-connect-");
+  assert.deepEqual(await disconnectAccount(site.origin, none, globalThis.fetch), { removed: false, revoked: false });
+  const other = temp(t, "mm-connect-");
+  await writeToken(other, new URL("https://motionmockups.com"), TOKEN);
+  const result = await disconnectAccount(site.origin, other, globalThis.fetch);
+  assert.equal(result.removed, true);
+  assert.equal(result.revoked, false);
+  assert.ok(result.detail);
+  assert.equal(fs.existsSync(path.join(other, TOKEN_FILE)), false);
+  assert.equal(site.seen.length, 0, "nothing was sent");
 });

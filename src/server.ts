@@ -17,7 +17,7 @@ import {
 import { z } from "zod";
 
 import { catalogSource, CATALOG_TIMEOUT_MS, serverInstructions, type AgentCatalog } from "./catalog.ts";
-import { connectFlows, currentAccount, openInBrowser, type Account, type Launcher } from "./connect.ts";
+import { connectFlows, currentAccount, disconnectAccount, openInBrowser, type Account, type Launcher } from "./connect.ts";
 import { allowedFolders, type Checked, type Problem } from "./folders.ts";
 import type { Progress, Rendered, RenderRequest, SessionContext } from "./session.ts";
 import { clearToken, redact } from "./token.ts";
@@ -165,8 +165,16 @@ const connectInput = z
       .boolean()
       .optional()
       .describe("Wait for the person to approve the code the previous call gave; returns once they approve or decline, within 10 minutes."),
-    open: z.boolean().optional().describe("Also open the link in the person's default browser. Only when the person asked for that."),
-    disconnect: z.boolean().optional().describe("Delete the saved connection from this computer; renders are free previews again."),
+    open: z
+      .boolean()
+      .optional()
+      .describe(
+        "Also open the link in the person's default browser. Recommended: a link this adapter opens itself is certainly its own. Never automatic: only when this is set.",
+      ),
+    disconnect: z
+      .boolean()
+      .optional()
+      .describe("Revoke this computer's connection on the site and delete it from this computer; renders are free previews again."),
   })
   .strict();
 
@@ -229,7 +237,7 @@ const connectedAnswer = (account: Extract<Account, { connected: true }>) => ({
 });
 
 const REVOKE =
-  "Its access stays on the account until it is revoked: on motionmockups.com, open Account, then Connected agents, and choose Revoke.";
+  "To be sure it no longer works, remove it on the account: on motionmockups.com, open Account, then Connected agents, and choose Revoke.";
 
 const cancelledProblem = (what: string): Problem => ({
   code: "cancelled",
@@ -504,7 +512,8 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
       description:
         "Whether this adapter is connected to a Motion Mockups account, and whether its renders are Pro (clean) or free (watermarked previews).",
       inputSchema: accountInput,
-      annotations: { readOnlyHint: true, openWorldHint: true },
+      // Not read-only: the site's own 401 deletes the saved token (src/connect.ts currentAccount).
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     },
     async (_args, extra) => {
       const checked = await account(extra.signal);
@@ -517,7 +526,7 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
     "connect_account",
     {
       description:
-        "Connect the person's Motion Mockups account, for clean Pro renders. Gives a link and code to show the person; then call again with wait: true until they approve. disconnect: true deletes the saved connection.",
+        "Connect the person's Motion Mockups account, for clean Pro renders. Gives a link and code to show the person (open: true, recommended, also opens it); then call again with wait: true until they approve. disconnect: true revokes and deletes the saved connection.",
       inputSchema: connectInput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
@@ -526,14 +535,17 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
         if (wait || open)
           return refused([{ code: "input", message: "disconnect cannot be combined with wait or open.", fix: "Send disconnect: true alone." }]);
         await flows.end();
-        const removed = await clearToken(deps.data);
+        const { removed, revoked, detail } = await disconnectAccount(deps.origin, deps.data, deps.fetch, extra.signal);
         return answer({
           signedIn: false,
           tier: "free",
           removed,
-          note: removed
-            ? `The saved connection was deleted from this computer; renders are free watermarked previews. ${REVOKE}`
-            : "There was no saved connection on this computer; renders are free watermarked previews.",
+          revoked,
+          note: !removed
+            ? "There was no saved connection on this computer; renders are free watermarked previews."
+            : revoked
+              ? "The site revoked this computer's connection, and it was deleted from this computer; renders are free watermarked previews."
+              : `The saved connection was deleted from this computer; renders are free watermarked previews. The site did not confirm that it revoked the connection (${detail ?? "no answer"}). ${REVOKE}`,
         });
       }
 

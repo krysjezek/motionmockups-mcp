@@ -189,7 +189,14 @@ test("the tools are the six documented ones", async (t) => {
     assert.doesNotMatch(tool.description!, /cinematic|stunning|studio-grade|in seconds|AI-powered|super easy/i);
   }
   // disconnect deletes the saved connection.
-  assert.equal(tools.find((tool) => tool.name === "connect_account")!.annotations?.destructiveHint, true);
+  const connect = tools.find((tool) => tool.name === "connect_account")!;
+  assert.equal(connect.annotations?.destructiveHint, true);
+  // A link the adapter opens itself is certainly its own; never opened without being asked.
+  assert.match(connect.description!, /open: true/);
+  assert.match((connect.inputSchema as any).properties.open.description, /[Rr]ecommended/);
+  assert.match((connect.inputSchema as any).properties.open.description, /[Nn]ever automatic/);
+  // account deletes the saved token when the site says it is no longer connected.
+  assert.equal(tools.find((tool) => tool.name === "account")!.annotations?.readOnlyHint, false);
 });
 
 test("list_scenes filters by device", async (t) => {
@@ -775,17 +782,24 @@ test("connect_account: wait reports progress with the code, and stopping the ser
   assert.equal(site.polls().length, polls);
 });
 
-test("connect_account disconnect deletes the saved token and says where to revoke it", async (t) => {
+test("connect_account disconnect revokes the token on the site, then deletes the saved file", async (t) => {
   const { client, site, data } = await onSite(t);
   await writeToken(data, site.origin, TOKEN);
   const result = structured(await client.callTool({ name: "connect_account", arguments: { disconnect: true } }));
   assert.equal(result.removed, true);
+  assert.equal(result.revoked, true);
   assert.equal(result.tier, "free");
-  assert.match(result.note, /Connected agents/);
-  assert.match(result.note, /Revoke/);
+  assert.match(result.note, /revoked/);
+  const sent = site.seen.filter((s) => s.path === "/api/agent/disconnect");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]!.method, "POST");
+  assert.equal(sent[0]!.authorization, `Bearer ${TOKEN}`);
   assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
+  assert.doesNotMatch(JSON.stringify(result), /mma_/);
   const none = structured(await client.callTool({ name: "connect_account", arguments: { disconnect: true } }));
   assert.equal(none.removed, false);
+  assert.equal(none.revoked, false);
+  assert.equal(site.seen.filter((s) => s.path === "/api/agent/disconnect").length, 1, "nothing to send without a token");
   const mixed = await client.callTool({ name: "connect_account", arguments: { disconnect: true, wait: true } });
   assert.equal(mixed.isError, true);
   assert.equal(structured(mixed).problems[0].code, "input");
@@ -973,4 +987,20 @@ test("the token never appears in a tool result, a progress report, an error or s
   assert.ok(!everything.includes(TOKEN), "the token is nowhere in what the server sent or logged");
   assert.ok(!everything.includes(TOKEN.slice(4)), "nor its body");
   assert.ok(!/mmd_/.test(everything), "nor the device code");
+});
+
+test("connect_account disconnect: a network failure still deletes the file and says to revoke it in the account", async (t) => {
+  const { client, site, data } = await onSite(t, { disconnect: () => ({ status: 0, body: null, cut: true }) });
+  await writeToken(data, site.origin, TOKEN);
+  const call = await client.callTool({ name: "connect_account", arguments: { disconnect: true } });
+  assert.notEqual(call.isError, true);
+  const result = structured(call);
+  assert.equal(result.removed, true);
+  assert.equal(result.revoked, false);
+  assert.match(result.note, /did not confirm/);
+  assert.match(result.note, /Connected agents/);
+  assert.match(result.note, /Revoke/);
+  assert.equal(site.seen.filter((s) => s.path === "/api/agent/disconnect").length, 1);
+  assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
+  assert.doesNotMatch(JSON.stringify(result), /mma_/);
 });

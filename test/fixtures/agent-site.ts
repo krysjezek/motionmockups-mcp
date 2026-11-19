@@ -1,6 +1,6 @@
 // A stand-in for the site's /api/agent/* on loopback, for the connect and account tests:
-// connect/start, connect/poll (answers taken from a script, one per poll) and status. Every
-// request is recorded with its time, headers and body.
+// connect/start, connect/poll (answers taken from a script, one per poll), status and
+// disconnect. Every request is recorded with its time, headers and body.
 
 import http from "node:http";
 import type net from "node:net";
@@ -18,6 +18,8 @@ export interface Answer {
   headers?: Record<string, string>;
   /** Answered after this many milliseconds. */
   delay?: number;
+  /** No answer: the connection is cut, as a network failure. */
+  cut?: boolean;
 }
 
 export interface Seen {
@@ -37,6 +39,8 @@ export interface SiteOptions {
   polls?: Answer[];
   /** status's answer for a bearer. */
   status?: (authorization: string | undefined) => Answer;
+  /** disconnect's answer for a bearer; by default 200 disconnected, as the site gives any agent token. */
+  disconnect?: (authorization: string | undefined) => Answer;
 }
 
 export interface Site {
@@ -52,6 +56,7 @@ export const denied: Answer = { status: 403, body: { status: "denied", error: "T
 export const expired: Answer = { status: 410, body: { status: "expired", error: "This sign-in code has expired. Start again." } };
 export const consumed: Answer = { status: 410, body: { status: "consumed", error: "This sign-in code was already used." } };
 export const unavailable: Answer = { status: 503, body: { error: "Accounts are unavailable." } };
+export const disconnected: Answer = { status: 200, body: { status: "disconnected" } };
 
 export const goodStart =
   (overrides: Record<string, unknown> = {}) =>
@@ -93,6 +98,7 @@ export async function agentSite(t: TestContext, options: SiteOptions = {}): Prom
       const send = (answer: Answer) => {
         const reply = () => {
           if (res.destroyed) return;
+          if (answer.cut) return void res.socket?.destroy();
           res.writeHead(answer.status, { "content-type": "application/json", ...answer.headers });
           res.end(answer.text ?? JSON.stringify(answer.body));
         };
@@ -110,6 +116,8 @@ export async function agentSite(t: TestContext, options: SiteOptions = {}): Prom
       }
       if (req.method === "GET" && url.pathname === "/api/agent/status")
         return send((options.status ?? statusFor(true))(req.headers.authorization));
+      if (req.method === "POST" && url.pathname === "/api/agent/disconnect")
+        return send((options.disconnect ?? (() => disconnected))(req.headers.authorization));
       send({ status: 404, body: { error: "There's no such route." } });
     });
   });
