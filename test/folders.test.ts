@@ -628,3 +628,30 @@ test("a folder reached by its 8.3 short name is a real folder, not a link", { sk
   const read = await readableRecording(path.join(short, "clip.mp4"), allowed);
   assert.equal(read.ok && read.value.path, clip, JSON.stringify(read));
 });
+
+test("outputFolder: a motion-mockups whose real path comes back under its 8.3 short name is no link", { skip: !windows && "8.3 short names are Windows'" }, async (t) => {
+  // outputFolder realpaths the allowed folder first, so a short name never reaches its link check
+  // on its own; here realpath answers for motion-mockups with the folder's other, short spelling,
+  // as a volume may. Only an identity check tells that this is the same folder, not a link.
+  const { dir } = sandbox(t);
+  const root = path.join(dir, "a project with a long name");
+  const out = path.join(root, "motion-mockups");
+  fs.mkdirSync(out, { recursive: true });
+  const short = shortName(out);
+  if (!short) {
+    t.skip("8.3 short names are disabled on this volume");
+    return;
+  }
+  const allowed = await allowedFolders([root], {});
+  const original = fs.promises.realpath;
+  mock.method(fs.promises, "realpath", async (p: fs.PathLike, ...rest: unknown[]) =>
+    path.resolve(String(p)) === out ? short : (original as (...a: unknown[]) => Promise<string>).call(fs.promises, p, ...rest),
+  );
+  syncBuiltinESMExports();
+  t.after(() => {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  const result = await outputFolder(allowed);
+  assert.deepEqual(result, { ok: true, value: short }, JSON.stringify(result));
+});
