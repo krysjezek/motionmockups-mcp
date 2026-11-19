@@ -29,6 +29,8 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+
+import { describeWindow, parseForeground } from "./foreground.mjs";
 import { ListRootsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 
 const repo = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -264,14 +266,13 @@ public static class MmFg {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
   [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern IntPtr FindWindow(string c, string t);
-  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
 }
 "@
+# A window as its handle, pid and process name. Its title is never read.
 function Describe($h) {
   $p = 0; [void][MmFg]::GetWindowThreadProcessId($h, [ref]$p)
   $name = '?'; try { $name = (Get-Process -Id $p -ErrorAction Stop).ProcessName } catch {}
-  $sb = New-Object System.Text.StringBuilder 256; [void][MmFg]::GetWindowText($h, $sb, 256)
-  return "$([int64]$h)\`t$p\`t$name\`t$($sb.ToString())"
+  return "$([int64]$h)\`t$p\`t$name"
 }`;
 
 /** A plain window of our own, in front: the "other app" a render must not take focus from. */
@@ -291,6 +292,7 @@ $f.Add_Shown({ $f.Activate() })
 async function watchForeground() {
   const script = `${USER32}
 $target = [MmFg]::FindWindow($null, '${FOCUS_TITLE}')
+[Console]::Out.WriteLine("target\`t" + [int64]$target); [Console]::Out.Flush()
 if ($target -ne [IntPtr]::Zero) { [void][MmFg]::SetForegroundWindow($target); Start-Sleep -Milliseconds 400 }
 [Console]::Out.WriteLine("ready\`t" + (Describe ([MmFg]::GetForegroundWindow()))); [Console]::Out.Flush()
 $last = [MmFg]::GetForegroundWindow()
@@ -313,22 +315,23 @@ while ($sw.Elapsed.TotalSeconds -lt 300) {
     if (text.includes("ready\t") && text.includes("\n")) readyResolve();
   });
   await Promise.race([ready, delay(15_000)]);
-  const parse = (line) => {
-    const [at, hwnd, pid, name, title] = line.split("\t");
-    // Another app's name and title are the person's business: record only that it was
-    // another app. Our own window and Chrome keep theirs, which the focus check needs.
-    const ours = title?.trim() === FOCUS_TITLE || /^chrome$/i.test(name ?? "");
-    return { at, hwnd, pid: Number(pid), name: ours ? name : "<another app>", title: ours ? title?.trim() : "<another app>" };
-  };
   return {
-    async stop() {
+    /**
+     * Stops watching. What counts as this run's own window is decided by `pids` (this run's
+     * Chrome) and the test window's handle; every other window is recorded only as another app,
+     * with no name and no title (the watcher never reads titles).
+     */
+    async stop(pids = []) {
       await delay(1000); // what happens as Chrome closes counts too
       child.kill();
-      const lines = text.trim().split(/\r?\n/).filter(Boolean).map(parse);
+      const all = text.trim().split(/\r?\n/).filter(Boolean);
+      const target = all.find((line) => line.startsWith("target\t"))?.split("\t")[1];
+      const own = { pids, hwnd: target && target !== "0" ? target : undefined };
+      const lines = all.filter((line) => !line.startsWith("target\t")).map((line) => parseForeground(line, own));
       const before = lines[0];
       const changes = lines.slice(1);
       const after = changes.at(-1) ?? before;
-      return { before, changes, after };
+      return { target: own.hwnd ?? null, before, changes, after };
     },
   };
 }
@@ -744,7 +747,7 @@ try {
               };
             },
           });
-          if (watching) focus = await watching.stop();
+          if (watching) focus = await watching.stop(seen?.pids ?? []);
           if (r.result.isError) {
             runs.push({ ms: r.ms, refused: r.value.problems });
             continue;
@@ -769,9 +772,10 @@ try {
         // Focus is taken when the foreground moves to a window of this run's Chrome. The window
         // in front is our own when Windows let us bring it forward, else whatever the person had
         // in front. Null when it could not be measured (not Windows).
-        const toOurChrome = focus ? focus.changes.filter((c) => seen?.pids.includes(c.pid)) : [];
+        const toOurChrome = focus ? focus.changes.filter((c) => c.ours && seen?.pids.includes(c.pid)) : [];
         const keptFocus = focus ? toOurChrome.length === 0 && focus.after?.hwnd === focus.before?.hwnd : null;
-        modes[mode] = { runs, chrome: seen ?? null, focus: focus ? { ...focus, inFrontWasOurs: focus.before?.title === FOCUS_TITLE } : null, keptFocus };
+        const inFrontWasOurs = !!focus?.target && focus.before?.hwnd === focus.target;
+        modes[mode] = { runs, chrome: seen ?? null, focus: focus ? { ...focus, inFrontWasOurs } : null, keptFocus };
         if (!(await chromeGone(10_000)).gone) killOurChrome();
       }
     } finally {
@@ -800,7 +804,7 @@ try {
       console.log(
         `MODE  ${mode}: ${r?.refused ? `refused ${JSON.stringify(r.refused)}` : `${r.frames} frames ${r.size}, ${Math.round(r.bitRate / 1000)} kb/s, ${r.profile} ${r.level}` + (r.ssimSides ? `, SSIM cut sides ${r.ssimSides.map((s) => s.ssim).join("/")} min ${r.ssimMin} mean ${r.ssimMean}` : "")}; ` +
           `render ${m.runs.map((x) => `${x.ms} ms`).join(", ")}; Chrome ${m.chrome ? `${m.chrome.processes} processes, --headless ${m.chrome.headlessFlag}` : "not seen"}; ` +
-          `focus ${m.keptFocus === null ? "not measured" : `${m.keptFocus ? "kept" : "TAKEN"}, in front ${m.focus.before?.name} "${m.focus.before?.title}"${m.focus.changes.length ? ` (changes: ${m.focus.changes.map((c) => `${c.name}/${c.pid} "${c.title}"`).join(" -> ")})` : ""}`}`,
+          `focus ${m.keptFocus === null ? "not measured" : `${m.keptFocus ? "kept" : "TAKEN"}, in front ${m.focus.inFrontWasOurs ? "the test window" : describeWindow(m.focus.before)}${m.focus.changes.length ? ` (changes: ${m.focus.changes.map(describeWindow).join(" -> ")})` : ""}`}`,
       );
     }
     console.log(`MODE  default: ${chosen}`);
