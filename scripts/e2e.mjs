@@ -315,7 +315,10 @@ while ($sw.Elapsed.TotalSeconds -lt 300) {
   await Promise.race([ready, delay(15_000)]);
   const parse = (line) => {
     const [at, hwnd, pid, name, title] = line.split("\t");
-    return { at, hwnd, pid: Number(pid), name, title: title?.trim() };
+    // Another app's name and title are the person's business: record only that it was
+    // another app. Our own window and Chrome keep theirs, which the focus check needs.
+    const ours = title?.trim() === FOCUS_TITLE || /^chrome$/i.test(name ?? "");
+    return { at, hwnd, pid: Number(pid), name: ours ? name : "<another app>", title: ours ? title?.trim() : "<another app>" };
   };
   return {
     async stop() {
