@@ -1,0 +1,339 @@
+{
+  "when": "2026-11-19T18:15:40.542Z",
+  "origin": "http://127.0.0.1:4173",
+  "platform": "win32 10.0.26200",
+  "node": "v24.14.0",
+  "chrome": "156.0.8078.82",
+  "recording": {
+    "fps": 30,
+    "sha256": "ba369284b669cbcbc4804a907090d85ff67f1dd00b1760eb3188f5eb173322ab"
+  },
+  "freeFilm": {
+    "file": "free-film.mp4",
+    "ms": 2913,
+    "width": 720,
+    "height": 404,
+    "frames": 75,
+    "profile": "High",
+    "level": 30,
+    "duration": 2.5,
+    "bitRate": 2563609,
+    "phases": [
+      "starting",
+      "checking",
+      "loading",
+      "rendering",
+      "finalizing",
+      "saving"
+    ]
+  },
+  "twoAdapters": {
+    "holds": [
+      {
+        "pid": 51832,
+        "first": 22,
+        "last": 2239
+      },
+      {
+        "pid": 42184,
+        "first": 2573,
+        "last": 4925
+      }
+    ],
+    "waited": {
+      "a": false,
+      "b": true
+    },
+    "aMs": 2270,
+    "bMs": 4935
+  },
+  "killed": {
+    "runs": [
+      {
+        "how": "taskkill /F",
+        "chromeWhileRendering": 9,
+        "gone": true,
+        "ms": 822,
+        "left": 0
+      },
+      {
+        "how": "client close",
+        "chromeWhileRendering": 9,
+        "gone": true,
+        "ms": 1363,
+        "left": 0
+      }
+    ],
+    "nextMs": 2509
+  },
+  "equality": {
+    "reference": {
+      "file": "<temp>",
+      "width": 720,
+      "height": 404,
+      "frames": 75,
+      "profile": "High",
+      "level": 30,
+      "duration": 2.5,
+      "bitRate": 3027910
+    },
+    "film": {
+      "width": 720,
+      "height": 404,
+      "frames": 75,
+      "profile": "High",
+      "level": 30,
+      "duration": 2.5,
+      "bitRate": 2563609
+    },
+    "sides": [
+      {
+        "frame": 29,
+        "ssim": 0.9939
+      },
+      {
+        "frame": 30,
+        "ssim": 0.9962
+      }
+    ],
+    "min": 0.9932,
+    "mean": 0.9946
+  },
+  "chromeModes": {
+    "modes": {
+      "headless": {
+        "runs": [
+          {
+            "ms": 2274,
+            "frames": 75,
+            "size": "720x404",
+            "bitRate": 2563609,
+            "bytes": 801128,
+            "sha256": "6ac0c70e7d896d04ecd513cdb516329053e9048bca5a1576e6715af0400d8990",
+            "profile": "High",
+            "level": 30,
+            "warnings": [
+              "A free render is a preview: at most 720 pixels, with the preview pill and the scene's watermark. Pro renders at the plan's size."
+            ],
+            "ssimSides": [
+              {
+                "frame": 29,
+                "ssim": 0.9939
+              },
+              {
+                "frame": 30,
+                "ssim": 0.9962
+              }
+            ],
+            "ssimMin": 0.9932,
+            "ssimMean": 0.9946
+          },
+          {
+            "ms": 2225,
+            "frames": 75,
+            "size": "720x404",
+            "bitRate": 2553196,
+            "bytes": 797874,
+            "sha256": "689ef9b91a5e1f8a659b81e0b1af54a44dfbbb13b654988ff881eaaa85bd370b",
+            "profile": "High",
+            "level": 30,
+            "warnings": [
+              "A free render is a preview: at most 720 pixels, with the preview pill and the scene's watermark. Pro renders at the plan's size."
+            ],
+            "ssimSides": [
+              {
+                "frame": 29,
+                "ssim": 0.9939
+              },
+              {
+                "frame": 30,
+                "ssim": 0.9962
+              }
+            ],
+            "ssimMin": 0.9932,
+            "ssimMean": 0.9946
+          }
+        ],
+        "chrome": {
+          "processes": 9,
+          "pids": [
+            50220,
+            54400,
+            44680,
+            16920,
+            53132,
+            58856,
+            47432,
+            53432,
+            38936
+          ],
+          "browser": [
+            50220
+          ],
+          "headlessFlag": true
+        },
+        "focus": {
+          "before": {
+            "at": "ready",
+            "hwnd": "132680",
+            "pid": 10292,
+            "name": "<another app>",
+            "title": "<another app>"
+          },
+          "changes": [],
+          "after": {
+            "at": "ready",
+            "hwnd": "132680",
+            "pid": 10292,
+            "name": "<another app>",
+            "title": "<another app>"
+          },
+          "inFrontWasOurs": false
+        },
+        "keptFocus": true
+      },
+      "window": {
+        "runs": [
+          {
+            "ms": 2499,
+            "frames": 75,
+            "size": "720x404",
+            "bitRate": 2563609,
+            "bytes": 801128,
+            "sha256": "24eb49835bb272b6f23295659a1e7b558f9eedec782fe8567840b956d7330d02",
+            "profile": "High",
+            "level": 30,
+            "warnings": [
+              "A free render is a preview: at most 720 pixels, with the preview pill and the scene's watermark. Pro renders at the plan's size."
+            ],
+            "ssimSides": [
+              {
+                "frame": 29,
+                "ssim": 0.9939
+              },
+              {
+                "frame": 30,
+                "ssim": 0.9962
+              }
+            ],
+            "ssimMin": 0.9932,
+            "ssimMean": 0.9946
+          },
+          {
+            "ms": 2505,
+            "frames": 75,
+            "size": "720x404",
+            "bitRate": 2563609,
+            "bytes": 801128,
+            "sha256": "ed002bc80ab2f8f30caec27d024672dae8a70cb121ff26aa36dcf33217a14ce1",
+            "profile": "High",
+            "level": 30,
+            "warnings": [
+              "A free render is a preview: at most 720 pixels, with the preview pill and the scene's watermark. Pro renders at the plan's size."
+            ],
+            "ssimSides": [
+              {
+                "frame": 29,
+                "ssim": 0.9939
+              },
+              {
+                "frame": 30,
+                "ssim": 0.9962
+              }
+            ],
+            "ssimMin": 0.9932,
+            "ssimMean": 0.9946
+          }
+        ],
+        "chrome": {
+          "processes": 9,
+          "pids": [
+            25416,
+            54896,
+            48004,
+            36532,
+            38532,
+            53432,
+            59244,
+            37096,
+            55640
+          ],
+          "browser": [
+            25416
+          ],
+          "headlessFlag": false
+        },
+        "focus": {
+          "before": {
+            "at": "ready",
+            "hwnd": "132680",
+            "pid": 10292,
+            "name": "<another app>",
+            "title": "<another app>"
+          },
+          "changes": [],
+          "after": {
+            "at": "ready",
+            "hwnd": "132680",
+            "pid": 10292,
+            "name": "<another app>",
+            "title": "<another app>"
+          },
+          "inFrontWasOurs": false
+        },
+        "keptFocus": true
+      }
+    },
+    "headlessPasses": true,
+    "windowPasses": true,
+    "windowKeepsFocus": true,
+    "default": "headless"
+  },
+  "checks": [
+    {
+      "name": "free film and stills",
+      "result": "pass",
+      "detail": "list_scenes 25 iPhone scenes (both plan scenes listed); free-film.mp4 75 frames (expected 75) at 720x404 in 2913 ms; notice verbatim; warnings 1; stills: still-png-00m01s06f.png 720x404 magic ok, still-jpeg-00m01s06f.jpg 720x404 magic ok"
+    },
+    {
+      "name": "scenes delivery",
+      "result": "pass",
+      "detail": "scenes-01.mp4: 30 frames (expected 30); scenes-02.mp4: 45 frames (expected 45)"
+    },
+    {
+      "name": "escapes",
+      "result": "pass",
+      "detail": "recording outside the root (absolute): refused folder; \"../outside/recording.mp4\": refused folder; name \"../../escaped\": cleaned to motion-mockups/escaped-00m00s15f.png; files outside motion-mockups/ unchanged"
+    },
+    {
+      "name": "two adapters at once",
+      "result": "pass",
+      "detail": "both rendered 75 frames: true; lock holds (ms from start) pid 51832 22–2239, pid 42184 2573–4925; no overlap; waiting reported by B"
+    },
+    {
+      "name": "cancel, then render",
+      "result": "pass",
+      "detail": "cancelled while rendering, call rejected (MCP error -32001: e2e cancel); this run's Chrome gone after 557 ms; lock released; leftovers in motion-mockups/ 0, in staging 0; next render 75 frames"
+    },
+    {
+      "name": "adapter killed mid-render",
+      "result": "pass",
+      "detail": "taskkill /F: 9 Chrome processes while rendering, none left after 822 ms; client close: 9 Chrome processes while rendering, none left after 1363 ms; next render 75 frames in 2509 ms"
+    },
+    {
+      "name": "Chrome problems",
+      "result": "pass",
+      "detail": "MOTIONMOCKUPS_CHROME=<missing>: refused code chrome (\"MOTIONMOCKUPS_CHROME is \"<temp>\", but there is no file there.\"); MOTIONMOCKUPS_ORIGIN=https://example.com: exit 1, stdout empty, stderr \"motionmockups: MOTIONMOCKUPS_ORIGIN is \"https://example.com\", which is not the Motion Mockups site, a local preview of it or one of its Vercel previews.\" (siteOrigin's code \"origin\" refusal; the command line prints its message and fix)"
+    },
+    {
+      "name": "equality with the page",
+      "result": "pass",
+      "detail": "75 frames vs the page's 75, 720x404 vs 720x404; SSIM either side of the cut f29 0.9939, f30 0.9962 (needs ≥ 0.97); all frames min 0.9932, mean 0.9946"
+    }
+  ],
+  "tally": {
+    "pass": 8,
+    "fail": 0,
+    "skip": 0
+  }
+}

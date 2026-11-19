@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+        node: [20, 24]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - run: npm ci
+      # The tests are TypeScript run by Node's own type stripping, which Node 20 does not
+      # have. On Node 20 the built bundle is checked by the smoke test below instead.
+      # GitHub's runners have Chrome installed, so the Chrome launch tests run; the render
+      # session tests skip without MOTIONMOCKUPS_TEST_ORIGIN, and the e2e is not run here.
+      - run: npm test
+        if: matrix.node != 20
+      - run: npm run build
+      - run: node scripts/smoke.mjs
+      - run: npm pack --dry-run
