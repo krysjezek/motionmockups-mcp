@@ -699,9 +699,17 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
       throw problemError("plan", "The plan could not be sent: it is not plain JSON.", "Send the plan as a JSON object.");
     }
     await onAgentPage();
-    // Parsed in the page, never pasted in as code: a plan is data.
-    const expression = `motionMockupsAgent.${request.still ? "still" : "render"}(JSON.parse(${JSON.stringify(json)}))`;
-    rendering = inAgentPage(cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true, uniqueContextId: agentContext }, sessionId));
+    // The call is a value handed to a fixed function, never script source: the plan is data, and
+    // the token appears in no source text. Bound to the checked page's context, like every
+    // command after the check: a page that replaced it never gets the call.
+    const params = {
+      functionDeclaration: `function (call) { return globalThis.motionMockupsAgent.${request.still ? "still" : "render"}(call); }`,
+      arguments: [{ value: JSON.parse(json) }],
+      awaitPromise: true,
+      returnByValue: true,
+      uniqueContextId: agentContext,
+    };
+    rendering = inAgentPage(cdp.send("Runtime.callFunctionOn", params, sessionId));
     rendering.then(
       () => (renderSettled = true),
       () => (renderSettled = true),

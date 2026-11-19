@@ -469,7 +469,16 @@ test("a Pro render hands the page tier pro and the token inside the render call 
     assert.ok(!JSON.stringify(launched).includes(token));
     const carrying = sent.filter((s) => JSON.stringify(s.params).includes(token));
     assert.equal(carrying.length, pro ? 1 : 0);
-    if (pro) assert.match(carrying[0]!.params.expression, /^motionMockupsAgent\.render\(JSON\.parse\(/);
+    if (pro) {
+      // A value passed to the render function, never script source; bound to the checked page.
+      const [render] = carrying;
+      assert.equal(render!.method, "Runtime.callFunctionOn");
+      assert.ok(!render!.params.functionDeclaration.includes(token));
+      assert.equal(render!.params.arguments[0].value.accessToken, token);
+      assert.equal(typeof render!.params.uniqueContextId, "string");
+    }
+    // No command at all carries it as source text.
+    assert.ok(!sent.some((s) => String(s.params.expression ?? "").includes(token)));
     assert.ok(!JSON.stringify(result).includes(token));
   }
 });
@@ -617,8 +626,11 @@ test("a page that navigates after the /agent check never gets the render or the 
           await send("Page.navigate", { url: new URL("/agent?second", origin).href }, sessionId);
           await new Promise((resolve) => setTimeout(resolve, 300));
         };
-        const bound = method === "Runtime.evaluate" && (params as { uniqueContextId?: string })?.uniqueContextId !== undefined;
-        const before = method === "Runtime.evaluate" && /getElementById\("agent-recording"\)|motionMockupsAgent\.render\(/.test((params as any)?.expression ?? "");
+        const bound =
+          (method === "Runtime.evaluate" || method === "Runtime.callFunctionOn") && (params as { uniqueContextId?: string })?.uniqueContextId !== undefined;
+        const before =
+          (method === "Runtime.evaluate" && /getElementById\("agent-recording"\)/.test((params as any)?.expression ?? "")) ||
+          (method === "Runtime.callFunctionOn" && /motionMockupsAgent\.render\(/.test((params as any)?.functionDeclaration ?? ""));
         if (when === "after" && !navigated && (bound || before)) await navigate();
         const answer = await send(method, params, sessionId);
         if (when === "check" && method === "Page.getFrameTree" && !navigated) await navigate();
