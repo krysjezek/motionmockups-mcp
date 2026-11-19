@@ -88,7 +88,13 @@ const running: Chrome[] = [];
 
 function listen(): Promise<[http.Server, number]> {
   return new Promise((resolve) => {
-    const s = http.createServer((_req, res) => res.end("<p>local</p>"));
+    // The body comes a moment after the headers, as on a slow runner: Page.navigate answers
+    // once the response is committed, before the page has loaded.
+    const s = http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.flushHeaders();
+      setTimeout(() => res.end("<p>local</p>"), 300);
+    });
     s.listen(0, "127.0.0.1", () => resolve([s, (s.address() as AddressInfo).port]));
   });
 }
@@ -117,7 +123,10 @@ async function launch(t: TestContext, origin = PUBLIC): Promise<Chrome> {
 
 async function evaluate(cdp: Cdp, sessionId: string, expression: string): Promise<unknown> {
   const result = await cdp.send<any>("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, sessionId);
-  if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+  if (result.exceptionDetails) {
+    const d = result.exceptionDetails;
+    throw new Error(`${d.text} ${d.exception?.description ?? ""}`.trim());
+  }
   return result.result.value;
 }
 
@@ -128,6 +137,29 @@ async function navigate(cdp: Cdp, sessionId: string, url: string): Promise<strin
   const result = await cdp.send<any>("Page.navigate", { url }, sessionId);
   return result.errorText || "reached";
 }
+
+/** Page.navigate answers once the response is committed; this waits for the page to have loaded. */
+async function loaded(cdp: Cdp, sessionId: string): Promise<void> {
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    const state = await evaluate(cdp, sessionId, "document.readyState").catch(() => "");
+    if (state === "complete") return;
+    if (Date.now() > deadline) throw new Error(`the page did not load (readyState ${JSON.stringify(state)})`);
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+/** Whether this machine reaches `url` at all (a runner may not): Chrome's reach is only meaningful then. */
+async function online(url: string): Promise<boolean> {
+  try {
+    await fetch(url, { method: "HEAD", signal: AbortSignal.timeout(5_000) });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const ASSET = "https://assets.motionmockups.com/robots.txt";
 
 /** pid -> parent pid, name, for every process. */
 function processes(): Map<number, { ppid: number; name: string }> {
@@ -167,10 +199,9 @@ test("a headless launch evaluates 1+1 to 2", { skip }, async (t) => {
   await chrome.close();
 });
 
-test("the proxy rule: allowed hosts through, others and loopback blocked", { skip }, async (t) => {
+test("the proxy rule: other hosts and loopback blocked", { skip }, async (t) => {
   const chrome = await launch(t);
   const { sessionId } = await openPage(chrome.cdp);
-  assert.equal(await evaluate(chrome.cdp, sessionId, reach("https://assets.motionmockups.com/robots.txt")), "reached");
   assert.match(String(await evaluate(chrome.cdp, sessionId, reach("https://example.com/"))), /^blocked/);
   // A public origin gets no loopback: Chrome would otherwise bypass the proxy for it implicitly.
   assert.equal(await navigate(chrome.cdp, sessionId, `http://127.0.0.1:${port}/`), "net::ERR_PROXY_CONNECTION_FAILED");
@@ -180,14 +211,30 @@ test("the proxy rule: allowed hosts through, others and loopback blocked", { ski
 });
 
 test("a loopback origin is reached; other ports and hosts are not", { skip }, async (t) => {
+  // Loopback fixtures only: nothing here depends on a host outside this machine.
   const chrome = await launch(t, new URL(`http://127.0.0.1:${port}`));
   const { sessionId } = await openPage(chrome.cdp);
   assert.equal(await navigate(chrome.cdp, sessionId, `http://127.0.0.1:${port}/`), "reached");
+  await loaded(chrome.cdp, sessionId);
   assert.equal(await evaluate(chrome.cdp, sessionId, "document.body.textContent"), "local");
-  assert.equal(await evaluate(chrome.cdp, sessionId, reach("https://assets.motionmockups.com/robots.txt")), "reached");
+  assert.equal(await evaluate(chrome.cdp, sessionId, reach(`http://127.0.0.1:${port}/again`)), "reached");
+  assert.match(String(await evaluate(chrome.cdp, sessionId, reach(`http://127.0.0.1:${otherPort}/`))), /^blocked/);
   assert.match(String(await evaluate(chrome.cdp, sessionId, reach("https://example.com/"))), /^blocked/);
   assert.equal(await navigate(chrome.cdp, sessionId, `http://127.0.0.1:${otherPort}/`), "net::ERR_PROXY_CONNECTION_FAILED");
   await chrome.close();
+});
+
+test("the allowed asset host is reached, from the public site and from a loopback origin", { skip }, async (t) => {
+  if (!(await online(ASSET))) {
+    t.skip(`${new URL(ASSET).host} is not reachable from this machine`);
+    return;
+  }
+  for (const origin of [PUBLIC, new URL(`http://127.0.0.1:${port}`)]) {
+    const chrome = await launch(t, origin);
+    const { sessionId } = await openPage(chrome.cdp);
+    assert.equal(await evaluate(chrome.cdp, sessionId, reach(ASSET)), "reached", origin.href);
+    await chrome.close();
+  }
 });
 
 test("a loopback origin on the default port does not open the other ports", { skip }, async (t) => {
