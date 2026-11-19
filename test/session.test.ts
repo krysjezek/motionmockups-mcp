@@ -2,6 +2,7 @@ import { after, before, describe, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -10,7 +11,18 @@ import { findChrome } from "../src/chrome/find.ts";
 import { launchChrome } from "../src/chrome/launch.ts";
 import { allowedFolders } from "../src/folders.ts";
 import { acquireRenderLock, LOCK_NAME } from "../src/lock.ts";
-import { checkResult, deliveredName, FREE_NOTICE, pageProgress, renderOnce, stopSignal, sweepStaging, type RenderRequest } from "../src/session.ts";
+import {
+  agentPageProblem,
+  checkResult,
+  deliveredName,
+  FREE_NOTICE,
+  pageProgress,
+  progressForwarder,
+  renderOnce,
+  stopSignal,
+  sweepStaging,
+  type RenderRequest,
+} from "../src/session.ts";
 
 const NOTICE = "Watermarked preview for evaluation only. Publishing it needs Motion Mockups Pro (https://motionmockups.com/pricing).";
 const TEST_ORIGIN = process.env.MOTIONMOCKUPS_TEST_ORIGIN?.trim();
@@ -301,6 +313,206 @@ for (const mode of ["headless", "window"] as const) {
   );
 }
 
+// ---- a stand-in agent page on loopback (Chrome needed, no site) ----
+
+type Sent = { method: string; params: any };
+
+/** Serves `/agent` with `script` as its page, on a loopback port; closed when the test ends. */
+async function standIn(t: TestContext, script: string): Promise<URL> {
+  const server = http.createServer((req, res) => {
+    if (req.url !== "/agent") {
+      res.writeHead(404).end();
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
+    res.end(`<!doctype html><meta charset="utf-8"><title>agent</title><input id="agent-recording" type="file"><script>${script}</script>`);
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+  t.after(() => new Promise<void>((resolve) => server.close(() => resolve())));
+  return new URL(`http://127.0.0.1:${(server.address() as net.AddressInfo).port}`);
+}
+
+/** launchChrome, with every CDP command the session sends recorded in `sent`. */
+const recordingLaunch =
+  (sent: Sent[]): typeof launchChrome =>
+  async (options) => {
+    const chrome = await launchChrome(options);
+    const send = chrome.cdp.send.bind(chrome.cdp);
+    chrome.cdp.send = ((method: string, params?: object, sessionId?: string) => {
+      sent.push({ method, params: params ?? {} });
+      return send(method, params, sessionId);
+    }) as typeof chrome.cdp.send;
+    return chrome;
+  };
+
+/** The page's agent: `render` is the body of an async function of `call`; files are made with `file(name, text, bytes?)`. */
+const agentScript = (render: string, extra = "") => `
+  const file = (name, text, bytes) => ({ name, bytes: bytes ?? new Blob([text]).size, url: URL.createObjectURL(new Blob([text])) });
+  ${extra}
+  globalThis.motionMockupsAgent = {
+    version: 1,
+    async render(call) { ${render} },
+    async still(call) { ${render} },
+    cancel() {},
+    release() {},
+  };`;
+
+const withChrome = { skip: found.ok ? false : "no Google Chrome on this machine" };
+
+async function standInRender(t: TestContext, script: string, request: Partial<RenderRequest> = {}) {
+  const project = temp(t, "mm-session-project-");
+  const data = temp(t, "mm-session-data-");
+  const origin = await standIn(t, script);
+  const sent: Sent[] = [];
+  const seen: Progress[] = [];
+  const result = await renderOnce(
+    { plan: PLAN, name: "film", ...request },
+    context({ allowed: [project], data, origin, launch: recordingLaunch(sent), onProgress: (p) => seen.push(p) }),
+  );
+  return { result, sent, seen, project, data };
+}
+
+test("the page is never given a user gesture but for the download click", withChrome, async (t: TestContext) => {
+  // The agent appears late, so the readiness poll runs several times first.
+  const script = agentScript(
+    `return { ok: true, files: [file("film.mp4", "a film")], warnings: [String(navigator.userActivation.hasBeenActive)] };`,
+  );
+  const { result, sent } = await standInRender(t, `setTimeout(() => { ${script} }, 800);`);
+  assert.ok(result.ok, JSON.stringify(result));
+  assert.deepEqual(result.value.warnings, ["false"], "no activation before render()");
+  const evaluations = sent.filter((s) => s.method === "Runtime.evaluate");
+  assert.ok(evaluations.length > 3, `${evaluations.length} evaluations`);
+  const gestures = evaluations.filter((s) => s.params.userGesture);
+  assert.equal(gestures.length, 1, JSON.stringify(gestures.map((g) => g.params.expression)));
+  assert.match(gestures[0]!.params.expression, /a\.click\(\)/);
+  assert.equal(fs.readFileSync(result.value.files[0]!.path, "utf8"), "a film");
+});
+
+test("page text is capped: warnings, a thrown error's first line and the saving file name", withChrome, async (t: TestContext) => {
+  {
+    const name = `${"n".repeat(246)}.mp4`; // 250 characters: a name, but a long one
+    const { result, seen } = await standInRender(
+      t,
+      agentScript(`return { ok: true, files: [file(${JSON.stringify(name)}, "x")], warnings: Array.from({ length: 50 }, () => "w".repeat(5000)) };`),
+    );
+    assert.ok(result.ok, JSON.stringify(result).slice(0, 500));
+    assert.equal(result.value.warnings.length, 20);
+    for (const w of result.value.warnings) assert.equal(w.length, 500);
+    const saving = seen.filter((p) => p.phase === "saving" && p.message);
+    assert.ok(saving.length >= 1, JSON.stringify(seen));
+    for (const p of saving) assert.ok(p.message!.length <= 200, `${p.message!.length}`);
+  }
+  {
+    const { result } = await standInRender(t, agentScript(`throw new Error("x".repeat(10000) + "\\nsecond line");`));
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    const [problem] = result.problems;
+    assert.equal(problem!.code, "page");
+    assert.equal(problem!.source, "site");
+    assert.ok(problem!.message.length <= 560, `${problem!.message.length}`);
+    assert.ok(!problem!.message.includes("second line"));
+  }
+});
+
+test("a refusal's problems are capped and labelled as the site's", () => {
+  const long = (c: string, n: number) => c.repeat(n);
+  const result = checkResult(
+    { ok: false, problems: Array.from({ length: 50 }, () => ({ code: long("c", 500), message: long("m", 5000), fix: long("f", 5000), extra: 1 })) },
+    SITE,
+  );
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.problems.length, 20);
+  for (const p of result.problems) {
+    assert.deepEqual(Object.keys(p).sort(), ["code", "fix", "message", "source"]);
+    assert.equal(p.code.length, 64);
+    assert.equal(p.message.length, 1000);
+    assert.equal(p.fix.length, 1000);
+    assert.equal(p.source, "site");
+  }
+  const ok = checkResult({ ok: true, files: [{ name: "a.mp4", bytes: 1, url: blob }], warnings: [1, "w".repeat(600), ...Array(30).fill("x")] }, SITE);
+  assert.ok(ok.ok);
+  assert.equal(ok.warnings.length, 20);
+  assert.equal(ok.warnings[0]!.length, 500);
+  // Never half a character at the cut.
+  const emoji = checkResult({ ok: false, problems: [{ code: "x", message: "😀".repeat(600), fix: "f" }] }, SITE);
+  assert.ok(!emoji.ok && !/[\ud800-\udbff]$/.test(emoji.problems[0]!.message));
+});
+
+test("progress: at most one report per 250 ms, phase changes and ends included; one final report; 2,000 at most", () => {
+  let clock = 0;
+  const got: Progress[] = [];
+  const report = progressForwarder((p) => got.push(p), () => clock);
+  report({ phase: "rendering", completed: 0, total: 10 });
+  report({ phase: "encoding", completed: 0, total: 10 }); // a new phase, 0 ms later
+  report({ phase: "encoding", completed: 10, total: 10 }); // the end of one
+  clock = 249;
+  report({ phase: "saving", completed: 0, total: 1 });
+  assert.equal(got.length, 1);
+  clock = 250;
+  report({ phase: "saving", completed: 0, total: 1 });
+  assert.equal(got.length, 2);
+  report({ phase: "saving", completed: 1, total: 1 }, true);
+  assert.equal(got.length, 3, "the final report always goes");
+  report({ phase: "saving", completed: 1, total: 1 }, true);
+  clock = 10_000;
+  report({ phase: "saving", completed: 1, total: 1 }, true);
+  assert.equal(got.length, 3, "only one final report");
+
+  const many: Progress[] = [];
+  let at = 0;
+  const flood = progressForwarder((p) => many.push(p), () => at);
+  for (let i = 0; i < 5000; i++) {
+    at += 300;
+    flood({ phase: "rendering", completed: i, total: 5000 });
+  }
+  flood({ phase: "saving", completed: 1, total: 1 }, true);
+  assert.equal(many.length, 2000);
+  assert.equal(many.at(-1)!.phase, "saving", "the final report still goes after the cap");
+});
+
+test("the recording is handed over, and the render started, only on the configured origin's /agent", withChrome, async (t: TestContext) => {
+  // The page moves itself off /agent once its agent is there; render() reports that it was called.
+  const script = agentScript(
+    `return { ok: false, problems: [{ code: "called", message: "render() ran", fix: "-" }] };`,
+    `history.replaceState(null, "", "/elsewhere");`,
+  );
+  for (const recording of [true, false]) {
+    const project = temp(t, "mm-session-project-");
+    const data = temp(t, "mm-session-data-");
+    const origin = await standIn(t, script);
+    const sent: Sent[] = [];
+    if (recording) fs.writeFileSync(path.join(project, "clip.mp4"), Buffer.from("000000186674797069736f6d0000020069736f6d69736f32", "hex"));
+    const result = await renderOnce(
+      { plan: PLAN, ...(recording ? { recording: "clip.mp4" } : {}) },
+      context({ allowed: [project], data, origin, launch: recordingLaunch(sent) }),
+    );
+    assert.equal(result.ok, false);
+    if (result.ok) continue;
+    assert.equal(result.problems[0]!.code, "site", `recording ${recording}: ${JSON.stringify(result.problems)}`);
+    assert.match(result.problems[0]!.message, /\/elsewhere/);
+    assert.ok(!sent.some((s) => s.method === "DOM.setFileInputFiles"), "the recording was not handed over");
+  }
+  assert.equal(agentPageProblem("http://127.0.0.1:4173/agent", SITE), null);
+  assert.equal(agentPageProblem("http://127.0.0.1:4173/agent?x=1#y", SITE), null);
+  for (const href of ["http://127.0.0.1:4173/elsewhere", "http://127.0.0.1:4174/agent", "http://localhost:4173/agent", "about:blank", "not a url"])
+    assert.equal(agentPageProblem(href, SITE)?.code, "site", href);
+});
+
+test("when a render fails while downloads are allowed, downloads are denied before the page is cancelled or released", withChrome, async (t: TestContext) => {
+  // A file whose size is not what the page says: the save fails after downloads were allowed.
+  const { result, sent } = await standInRender(t, agentScript(`return { ok: true, files: [file("film.mp4", "short", 999)], warnings: [] };`));
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.equal(result.problems[0]!.code, "download", JSON.stringify(result.problems));
+  const allowedAt = sent.map((s) => s.method === "Browser.setDownloadBehavior" && s.params.behavior === "allowAndName").lastIndexOf(true);
+  assert.ok(allowedAt >= 0);
+  const after = sent.slice(allowedAt + 1);
+  const denied = after.findIndex((s) => s.method === "Browser.setDownloadBehavior" && s.params.behavior === "deny");
+  const pageCall = after.findIndex((s) => s.method === "Runtime.evaluate" && /motionMockupsAgent\.(cancel|release)\(\)/.test(s.params.expression));
+  assert.ok(denied >= 0, `no deny after the allow: ${after.map((s) => s.method).join(", ")}`);
+  assert.ok(pageCall === -1 || denied < pageCall, `deny at ${denied}, page call at ${pageCall}: ${after.map((s) => s.method).join(", ")}`);
+});
+
 // ---- against the agent page ----
 
 describe("a render session on the agent page", { skip: TEST_ORIGIN ? false : "MOTIONMOCKUPS_TEST_ORIGIN is not set" }, () => {
@@ -549,11 +761,13 @@ describe("a render session on the agent page", { skip: TEST_ORIGIN ? false : "MO
     assert.deepEqual(staged(), []);
   });
 
-  test("the page's refusals pass through unchanged", async () => {
+  test("the page's refusals pass through, labelled as the site's", async () => {
     const result = await renderOnce({ plan: { ...film.plan as object, clips: [{ scene: "no-such-scene" }] }, name: "x" }, ctx());
     assert.equal(result.ok, false);
     if (result.ok) return;
-    assert.deepEqual(result.problems, [{ code: "scene", message: '"no-such-scene" is not a scene.', fix: "Take scene ids from the catalog." }]);
+    assert.deepEqual(result.problems, [
+      { code: "scene", message: '"no-such-scene" is not a scene.', fix: "Take scene ids from the catalog.", source: "site" },
+    ]);
     assert.ok(await chromeGone(path.join(data, "chrome-profile")));
   });
 

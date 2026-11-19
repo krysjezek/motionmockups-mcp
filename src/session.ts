@@ -69,6 +69,8 @@ export interface SessionContext {
   signal: AbortSignal;
   timeoutMs: number;
   onProgress: (p: Progress) => void;
+  /** Starts Chrome; tests wrap it to watch what the session sends. Default launchChrome. */
+  launch?: typeof launchChrome;
 }
 
 export const FREE_NOTICE =
@@ -92,6 +94,15 @@ const DOWNLOAD_START_MS = 15_000;
 const DOWNLOAD_STALL_MS = 60_000;
 const WAIT_REPORT_MS = 5_000;
 const PROGRESS_MS = 250;
+/** Progress notifications one render forwards at most, the final one included. */
+const PROGRESS_CAP = 2_000;
+/** What the page's words may take up: they reach the agent's context. */
+const WARNINGS_MAX = 20;
+const WARNING_CHARS = 500;
+const PROBLEMS_MAX = 20;
+const CODE_CHARS = 64;
+const PROBLEM_CHARS = 1_000;
+const EXCEPTION_CHARS = 500;
 /** The extensions the page delivers. */
 const EXTENSIONS = new Set(["mp4", "png", "jpg"]);
 /** The page calls this global for progress; the injected script forwards it to the binding. */
@@ -134,7 +145,7 @@ const hasProblemShape = (value: unknown): value is Problem =>
 
 const asProblem = (error: unknown): Problem =>
   hasProblemShape(error)
-    ? { code: error.code, message: error.message, fix: error.fix }
+    ? { code: error.code, message: error.message, fix: error.fix, ...(error.source === "site" ? { source: "site" as const } : {}) }
     : {
         code: "adapter",
         message: `The render stopped unexpectedly: ${error instanceof Error ? error.message : String(error)}`,
@@ -200,7 +211,22 @@ function until<T>(work: Promise<T>, signal: AbortSignal, ms: number, onTimeout: 
 
 const PROGRESS_TEXT = 200;
 const PROGRESS_PAYLOAD = 10_000;
-const progressText = (v: unknown) => (typeof v === "string" && v ? v.slice(0, PROGRESS_TEXT) : undefined);
+/** `text` cut to at most `max` characters, never through the middle of one. */
+export function capText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  return /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut;
+}
+
+const progressText = (v: unknown) => (typeof v === "string" && v ? capText(v, PROGRESS_TEXT) : undefined);
+
+/** An exception the page threw, by its first line only, capped. The page's own words: source site. */
+function pageThrew(details: any): ProblemError {
+  const detail = String(details?.exception?.description ?? details?.text ?? "an exception").split("\n")[0]!;
+  return Object.assign(problemError("page", `The agent page threw: ${capText(detail, EXCEPTION_CHARS)}`, "Try the render again."), {
+    source: "site" as const,
+  });
+}
 
 /** The page's progress payload, checked: texts at most 200 characters, 0 <= completed <= total. Null when it is not progress. */
 export function pageProgress(payload: unknown): Progress | null {
@@ -298,13 +324,39 @@ interface AgentFile {
 type AgentResult = { ok: true; files: AgentFile[]; warnings: string[] } | { ok: false; problems: Problem[] };
 
 /** The page's result, checked for shape: its refusals pass through unchanged, anything else is a contract problem. */
+/**
+ * A `site` problem unless `href` (the main frame's URL, as Chrome reports it) is the configured
+ * origin's `/agent`. Checked before the recording is handed over and before the render starts:
+ * the page may have navigated or rewritten its own URL since it was opened.
+ */
+export function agentPageProblem(href: string, origin: URL): Problem | null {
+  let url: URL | undefined;
+  try {
+    url = new URL(href);
+  } catch {
+    url = undefined;
+  }
+  if (url && url.origin === origin.origin && url.pathname === "/agent") return null;
+  return {
+    code: "site",
+    message: `The page the adapter drives is no longer ${new URL("/agent", origin).href} but ${capText(href, 200)}; nothing was handed to it.`,
+    fix: "Try the render again. If it keeps happening, report it at https://motionmockups.com/contact.",
+  };
+}
+
 export function checkResult(value: unknown, origin: URL): AgentResult {
   const v = value as Record<string, unknown> | null;
   if (typeof v !== "object" || v === null) throw contractProblem("render() answered with no result.");
   if (v.ok === false) {
     if (!Array.isArray(v.problems) || v.problems.length === 0 || !v.problems.every(hasProblemShape))
       throw contractProblem("a refusal without { code, message, fix }.");
-    return { ok: false, problems: (v.problems as Problem[]).map(({ code, message, fix }) => ({ code, message, fix })) };
+    const problems = (v.problems as Problem[]).slice(0, PROBLEMS_MAX).map(({ code, message, fix }) => ({
+      code: capText(code, CODE_CHARS),
+      message: capText(message, PROBLEM_CHARS),
+      fix: capText(fix, PROBLEM_CHARS),
+      source: "site" as const,
+    }));
+    return { ok: false, problems };
   }
   if (v.ok !== true || !Array.isArray(v.files) || v.files.length === 0) throw contractProblem("a result with no files.");
   const prefix = `blob:${origin.origin}/`;
@@ -327,19 +379,34 @@ export function checkResult(value: unknown, origin: URL): AgentResult {
       );
     return { name: file.name, bytes: file.bytes, url: file.url };
   });
-  const warnings = Array.isArray(v.warnings) ? v.warnings.filter((w): w is string => typeof w === "string") : [];
+  const warnings = Array.isArray(v.warnings)
+    ? v.warnings
+        .filter((w): w is string => typeof w === "string")
+        .slice(0, WARNINGS_MAX)
+        .map((w) => capText(w, WARNING_CHARS))
+    : [];
   return { ok: true, files, warnings };
 }
 
-/** What the page reports, forwarded at most every PROGRESS_MS except on a change of phase or the end of one. */
-function progressForwarder(onProgress: (p: Progress) => void) {
-  let last = 0;
-  let phase = "";
-  return (p: Progress, force = false) => {
-    const now = performance.now();
-    if (!force && p.phase === phase && p.completed < p.total && now - last < PROGRESS_MS) return;
-    last = now;
-    phase = p.phase;
+/**
+ * Progress, forwarded at most once every PROGRESS_MS whatever it says (a page changing phase
+ * or finishing one on every call is throttled too), and PROGRESS_CAP times per render at most.
+ * The one `final` report always goes, once.
+ */
+export function progressForwarder(onProgress: (p: Progress) => void, now: () => number = () => performance.now()) {
+  let last = -Infinity;
+  let forwarded = 0;
+  let finished = false;
+  return (p: Progress, final = false) => {
+    const at = now();
+    if (final) {
+      if (finished) return;
+      finished = true;
+    } else {
+      if (finished || forwarded >= PROGRESS_CAP - 1 || at - last < PROGRESS_MS) return;
+      forwarded++;
+    }
+    last = at;
     try {
       onProgress(p);
     } catch {
@@ -388,7 +455,6 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
             total: 0,
             message: `Waiting for another render on this computer to finish (pid ${holder.pid}, since ${holder.since}).`,
           },
-          true,
         );
       },
     });
@@ -423,17 +489,24 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
   const send = <T = any>(method: string, params: object = {}, ms = SEND_MS, scoped = true): Promise<T> =>
     until(cdp!.send<T>(method, params, scoped ? sessionId : undefined), signal, ms, limited(method, ms), [gone]);
   /** The same, for teardown: bounded by time and Chrome's exit only, not by the (aborted) signal. */
-  const sendAfter = <T = any>(method: string, params: object, ms: number): Promise<T> =>
-    until(cdp!.send<T>(method, params, sessionId), new AbortController().signal, ms, limited(method, ms), [gone]);
-  /** Runs an expression in the page; its exception becomes a problem. */
-  const evaluate = async (expression: string, ms = SEND_MS, after = false): Promise<unknown> => {
-    const params = { expression, awaitPromise: true, returnByValue: true, userGesture: true };
-    const result: any = after ? await sendAfter("Runtime.evaluate", params, ms) : await send("Runtime.evaluate", params, ms);
-    if (result.exceptionDetails) {
-      const detail = result.exceptionDetails.exception?.description ?? result.exceptionDetails.text ?? "an exception";
-      throw problemError("page", `The agent page threw: ${String(detail).split("\n")[0]}`, "Try the render again.");
-    }
+  const sendAfter = <T = any>(method: string, params: object, ms: number, scoped = true): Promise<T> =>
+    until(cdp!.send<T>(method, params, scoped ? sessionId : undefined), new AbortController().signal, ms, limited(method, ms), [gone]);
+  /**
+   * Runs an expression in the page; its exception becomes a problem. No user gesture unless
+   * `userGesture` says so: only the download click is given one, never a poll the page could
+   * use to open windows, take the clipboard or go full screen.
+   */
+  const evaluate = async (expression: string, options: { userGesture?: boolean } = {}): Promise<unknown> => {
+    const params = { expression, awaitPromise: true, returnByValue: true, ...(options.userGesture ? { userGesture: true } : {}) };
+    const result: any = await send("Runtime.evaluate", params, SEND_MS);
+    if (result.exceptionDetails) throw pageThrew(result.exceptionDetails);
     return result.result?.value;
+  };
+  /** Refuses with `site` unless the main frame is still the origin's /agent (asked of Chrome, not of the page). */
+  const onAgentPage = async () => {
+    const { frameTree } = await send<{ frameTree: { frame: { url: string } } }>("Page.getFrameTree");
+    const problem = agentPageProblem(frameTree.frame.url, context.origin);
+    if (problem) throw problemError(problem.code, problem.message, problem.fix);
   };
 
   try {
@@ -443,9 +516,9 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
     await sweepStaging(staging);
 
     // 3. Chrome on the adapter's own profile.
-    report({ phase: "starting", completed: 0, total: 1, message: "Opening Chrome." }, true);
+    report({ phase: "starting", completed: 0, total: 1, message: "Opening Chrome." });
     await mkdir(staging, { recursive: true });
-    launching = launchChrome({ executable: executable.value, profile, origin: context.origin, mode: context.chromeMode });
+    launching = (context.launch ?? launchChrome)({ executable: executable.value, profile, origin: context.origin, mode: context.chromeMode });
     try {
       chrome = await until(launching, signal, Infinity, () => new Error("unreachable"));
     } catch (error) {
@@ -534,6 +607,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
           `${request.recording} changed while the render waited its turn: it is no longer the file that was checked.`,
           "Let the recording finish saving, then send the request again.",
         );
+      await onAgentPage();
       await send("DOM.setFileInputFiles", { files: [again.value.path], objectId });
     }
 
@@ -551,6 +625,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
     } catch {
       throw problemError("plan", "The plan could not be sent: it is not plain JSON.", "Send the plan as a JSON object.");
     }
+    await onAgentPage();
     // Parsed in the page, never pasted in as code: a plan is data.
     const expression = `motionMockupsAgent.${request.still ? "still" : "render"}(JSON.parse(${JSON.stringify(json)}))`;
     rendering = cdp.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, sessionId);
@@ -559,12 +634,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
       () => (renderSettled = true),
     );
     const answer: any = await until(rendering, signal, Infinity, () => new Error("unreachable"), [gone]);
-    if (answer.exceptionDetails)
-      throw problemError(
-        "page",
-        `The agent page threw: ${String(answer.exceptionDetails.exception?.description ?? answer.exceptionDetails.text).split("\n")[0]}`,
-        "Try the render again.",
-      );
+    if (answer.exceptionDetails) throw pageThrew(answer.exceptionDetails);
     const result = checkResult(answer.result?.value, context.origin);
     if (!result.ok) return { ok: false, problems: result.problems };
 
@@ -607,7 +677,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
     for (const [index, file] of result.files.entries()) {
       const name = deliveredName(file.name);
       if (!name) throw contractProblem(`${JSON.stringify(file.name)} is not a file name the page makes.`);
-      report({ phase: "saving", completed: index, total: result.files.length, message: file.name }, true);
+      report({ phase: "saving", completed: index, total: result.files.length, message: capText(file.name, PROGRESS_TEXT) });
       await send(
         "Browser.setDownloadBehavior",
         { behavior: "allowAndName", downloadPath: staging, eventsEnabled: true },
@@ -617,6 +687,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
       await evaluate(
         `(() => { const a = document.createElement("a"); a.href = ${JSON.stringify(file.url)}; a.download = ${JSON.stringify(file.name)};` +
           ` document.body.append(a); a.click(); a.remove(); })()`,
+        { userGesture: true },
       );
       const guid = await waitFor(
         () => begun.get(file.url),
@@ -658,7 +729,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
       stagedHere.delete(guid);
       delivered.push({ path: saved, bytes: size });
     }
-    report({ phase: "saving", completed: result.files.length, total: result.files.length }, true);
+    report({ phase: "saving", completed: result.files.length, total: result.files.length }, true); // the final report
     await send("Browser.setDownloadBehavior", { behavior: "deny" }, SEND_MS, false).catch(() => {});
 
     // 9. The page lets go of its links, its staged files and the recording.
@@ -672,6 +743,8 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
     return delivered.length ? { ok: false, problems, saved: [...delivered] } : { ok: false, problems };
   } finally {
     stop.dispose();
+    // Downloads denied first: nothing the page does while it is cancelled or released is saved.
+    if (cdp) await sendAfter("Browser.setDownloadBehavior", { behavior: "deny" }, SEND_MS, false).catch(() => {});
     if (cdp && pageReady) {
       // The page's cancel(), then the render settling (the page removes its staged file), then release().
       if (rendering && !renderSettled) {

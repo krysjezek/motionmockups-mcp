@@ -13,6 +13,8 @@ export interface Problem {
   code: string;
   message: string;
   fix: string;
+  /** "site" when the words are the site's agent page's own (passed through, capped), not the adapter's. */
+  source?: "site";
 }
 
 export type Checked<T> = { ok: true; value: T } | { ok: false; problems: Problem[] };

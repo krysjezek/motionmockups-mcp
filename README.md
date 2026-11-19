@@ -75,7 +75,10 @@ It needs Node.js 20 or later and Google Chrome (Chromium on Linux).
   that is a link to somewhere else is refused. A file is written under a
   hidden partial name first and appears under its own name only once it is
   whole.
-- Every refusal says what went wrong and how to fix it.
+- Every refusal says what went wrong and how to fix it. A refusal in the
+  site's own words (its agent page refused the plan) carries `source: "site"`;
+  the page's words reach the agent capped (20 problems and 20 warnings at
+  most, each cut short), and its progress at most four times a second.
 - The adapter sends nothing about what it renders: no analytics, no
   telemetry.
 

@@ -1,6 +1,6 @@
 import { mock, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
@@ -572,11 +572,8 @@ test("a Kelvin-sign sibling (\u212Ait beside kit) is outside", async (t) => {
 function shortName(p: string): string | null {
   if (!windows) return null;
   try {
-    const out = execFileSync("cmd", ["/d", "/s", "/c", `"for %I in ("${p}") do @echo %~sI"`], {
-      encoding: "utf8",
-      windowsHide: true,
-      windowsVerbatimArguments: true,
-    }).trim();
+    const run = spawnSync("cmd", ["/d", "/s", "/c", `"for %I in ("${p}") do @echo %~sI"`], { encoding: "utf8", windowsHide: true, windowsVerbatimArguments: true });
+    const out = run.status === 0 ? run.stdout.trim() : "";
     return out && out.toLowerCase() !== p.toLowerCase() && fs.existsSync(out) ? out : null;
   } catch {
     return null;
