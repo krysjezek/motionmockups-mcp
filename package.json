@@ -3,6 +3,10 @@
   "version": "0.1.0",
   "description": "Motion Mockups for AI agents: art-directed device mockup videos, rendered in your own Chrome. Preview, not yet released.",
   "homepage": "https://motionmockups.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/krysjezek/motionmockups-mcp.git"
+  },
   "license": "UNLICENSED",
   "author": "Krystof Jezek <hello@motionmockups.com>",
   "type": "module",
@@ -19,7 +23,8 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "test": "node --experimental-strip-types --test test/*.test.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build && node scripts/smoke.mjs"
   },
   "keywords": [
     "motion mockups",
