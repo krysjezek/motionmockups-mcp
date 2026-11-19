@@ -104,12 +104,18 @@ const exitDetail = (code: number | null, stderr: string) =>
     ? "the profile is in use by another Chrome (exit code 21)."
     : `it exited with code ${code}. ${stderr.trim()}`.trim();
 
-const startProblem = (detail: string) =>
-  problemError(
-    "chrome-start",
-    `Chrome did not start: ${detail}`,
-    "Make sure Google Chrome is installed and up to date (https://www.google.com/chrome/), or ask the person to set " +
-      "MOTIONMOCKUPS_CHROME in this MCP server's settings to the full path of their Chrome executable.",
+/** A `chrome-start` refusal; `exitCode` is set when Chrome ended on its own (0: it handed off to a running Chrome, 21: profile in use). */
+export type ChromeStartError = ReturnType<typeof problemError> & { exitCode?: number | null };
+
+const startProblem = (detail: string, exitCode?: number | null): ChromeStartError =>
+  Object.assign(
+    problemError(
+      "chrome-start",
+      `Chrome did not start: ${detail}`,
+      "Make sure Google Chrome is installed and up to date (https://www.google.com/chrome/), or ask the person to set " +
+        "MOTIONMOCKUPS_CHROME in this MCP server's settings to the full path of their Chrome executable.",
+    ),
+    exitCode === undefined ? {} : { exitCode },
   );
 
 export async function launchChrome(options: ChromeOptions): Promise<Chrome> {
@@ -166,7 +172,7 @@ export async function launchChrome(options: ChromeOptions): Promise<Chrome> {
     await Promise.race([
       cdp.send("Browser.getVersion"),
       exited.then((code) => {
-        throw startProblem(spawnError ? spawnError.message : exitDetail(code, stderr));
+        throw spawnError ? startProblem(spawnError.message) : startProblem(exitDetail(code, stderr), code);
       }),
       new Promise((_, reject) => (timer = setTimeout(() => reject(startProblem(`no answer within ${START_TIMEOUT_MS / 1000} s.`)), START_TIMEOUT_MS))),
     ]);
@@ -175,7 +181,7 @@ export async function launchChrome(options: ChromeOptions): Promise<Chrome> {
     if ((error as { code?: string }).code === "chrome-start") throw error;
     // The pipe closed because Chrome ended: say how it ended rather than "closed".
     const code = await Promise.race([exited, delay(KILL_WAIT_MS).then(() => null)]);
-    throw startProblem(spawnError ? spawnError.message : exitDetail(code, stderr));
+    throw spawnError ? startProblem(spawnError.message) : startProblem(exitDetail(code, stderr), code);
   } finally {
     clearTimeout(timer);
   }
