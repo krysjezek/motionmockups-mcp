@@ -286,6 +286,27 @@ test("end() stops a pending flow, including after a cancelled wait", async (t) =
   if (!after.ok) assert.match(after.problems[0]!.message, /No sign-in is waiting/);
 });
 
+test("end() while a sign-in is still starting: the start is dropped, never polled, nothing saved", async (t) => {
+  const data = temp(t, "mm-connect-");
+  const site = await agentSite(t, { start: (origin) => ({ ...goodStart()(origin), delay: 100 }), polls: [approved()] });
+  const f = flows(t, site.origin, data);
+  const begun = f.begin();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  await f.end();
+  const result = await begun;
+  assert.equal(result.ok, false, "a start that end() overtook is not a sign-in");
+  if (!result.ok) assert.equal(result.problems[0]!.code, "cancelled");
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(site.polls().length, 0, "never polled");
+  assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
+  const after = await f.wait(new AbortController().signal, () => {});
+  assert.equal(after.ok, false);
+  if (!after.ok) assert.match(after.problems[0]!.message, /No sign-in is waiting/);
+  // A new begin afterwards starts a fresh sign-in.
+  const again = await f.begin();
+  assert.ok(again.ok && !again.value.reused, JSON.stringify(again));
+});
+
 test("end() during an approving poll: once it returns, no token is ever written", async (t) => {
   const data = temp(t, "mm-connect-");
   // The approval is on its way when end() is called.

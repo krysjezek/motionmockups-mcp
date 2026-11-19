@@ -346,7 +346,11 @@ const stoppedWaiting = (f: Flow): Problem => ({
 export function connectFlows(deps: ConnectDeps) {
   const scale = deps.timeScale ?? 1;
   let flow: Flow | undefined;
-  let starting: Promise<Checked<Started>> | undefined;
+  /** A begin() still asking the site for a code; calls meanwhile share its answer. */
+  let starting: Promise<Checked<Started & { reused: boolean }>> | undefined;
+  let startAbort: AbortController | undefined;
+  /** Raised by every end(): a start that end() overtook is dropped, never polled. */
+  let generation = 0;
   /** Every run not yet finished, the current one and any ended ones. */
   const runs = new Set<Promise<unknown>>();
 
@@ -398,9 +402,12 @@ export function connectFlows(deps: ConnectDeps) {
   };
 
   const end = async () => {
+    generation += 1;
+    startAbort?.abort();
     const f = flow;
     flow = undefined;
     f?.controller.abort();
+    await starting;
     await Promise.all([...runs]);
   };
 
@@ -414,9 +421,13 @@ export function connectFlows(deps: ConnectDeps) {
       }
       // A finished one's outcome is dropped: a new sign-in starts over.
       flow = undefined;
-      starting = startConnect(deps.origin, deps.fetch);
-      try {
-        const s = await starting;
+      const at = generation;
+      const abort = new AbortController();
+      startAbort = abort;
+      const begun = (async (): Promise<Checked<Started & { reused: boolean }>> => {
+        const s = await startConnect(deps.origin, deps.fetch, abort.signal);
+        // end() came while the site was asked: this sign-in never starts.
+        if (at !== generation) return { ok: false, problems: [ended()] };
         if (!s.ok) return s;
         const f: Flow = {
           started: s.value,
@@ -431,8 +442,13 @@ export function connectFlows(deps: ConnectDeps) {
         runs.add(tracked);
         flow = f;
         return { ok: true, value: { ...s.value, reused: false } };
+      })();
+      starting = begun;
+      try {
+        return await begun;
       } finally {
-        starting = undefined;
+        if (starting === begun) starting = undefined;
+        if (startAbort === abort) startAbort = undefined;
       }
     },
 
