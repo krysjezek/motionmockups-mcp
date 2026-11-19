@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { acquireRenderLock, isAlive, LOCK_NAME, STALE_MS, type Held } from "../src/lock.ts";
+import { acquireRenderLock, BEAT_MS, isAlive, LOCK_NAME, STALE_MS, Watch, type Held } from "../src/lock.ts";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/hold-lock.ts", import.meta.url));
 
@@ -341,4 +341,34 @@ test("isAlive: ESRCH is dead; EPERM (another user's process) and success are ali
   assert.equal(isAlive(1234, () => true), true);
   assert.equal(isAlive(process.pid), true);
   assert.equal(isAlive(deadPid()), false);
+});
+
+// ---- the waiter's watch, on an injected clock ----
+
+test("Watch: unchanged time builds up only from sightings close together", () => {
+  let now = 0;
+  const watch = new Watch(BEAT_MS, () => now);
+  // Polled every 500 ms for 70 s: watched unchanged for 70 s, longer than STALE_MS.
+  for (; now <= 70_000; now += 500) watch.unchangedFor("a");
+  assert.equal(watch.unchangedFor("a"), 70_500);
+  assert.ok(watch.unchangedFor("a") > STALE_MS);
+  // A new key starts again.
+  assert.equal(watch.unchangedFor("b"), 0);
+});
+
+test("Watch: a laptop asleep while watching does not count as watched", () => {
+  let now = 0;
+  const watch = new Watch(BEAT_MS, () => now);
+  for (; now <= 20_000; now += 500) watch.unchangedFor("a");
+  // Asleep for 3 h; the monotonic clock counted it. The first sighting on wake starts again.
+  now += 3 * 3_600_000;
+  assert.equal(watch.unchangedFor("a"), 0);
+  // Then it builds up again only while the waiter keeps watching.
+  now += 500;
+  assert.equal(watch.unchangedFor("a"), 500);
+  // A gap of exactly gapMs still counts; one beyond it does not.
+  now += BEAT_MS;
+  assert.equal(watch.unchangedFor("a"), 500 + BEAT_MS);
+  now += BEAT_MS + 1;
+  assert.equal(watch.unchangedFor("a"), 0);
 });

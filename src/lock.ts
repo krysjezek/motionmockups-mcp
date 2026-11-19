@@ -14,7 +14,9 @@
 //     between create and write).
 // "Unchanged" is judged on the waiter's own monotonic clock, never by comparing the file's
 // time with the wall clock: after a laptop sleeps, a clock jump or on a network folder whose
-// server clock is skewed, an old-looking time is not a dead holder.
+// server clock is skewed, an old-looking time is not a dead holder. Only sightings at most
+// BEAT_MS apart add up, so a sleep during the watch (which the monotonic clock may count) or a
+// stalled waiter starts the watch again rather than counting as time watched.
 // Taking over is serialised by a second exclusive file, `render.lock.claim`: the claimant
 // re-reads the lock and deletes it only if it is exactly the one judged stale, so two waiters
 // cannot delete each other's fresh lock. Then every waiter races the exclusive create again.
@@ -41,7 +43,7 @@ export interface LockOptions {
   signal?: AbortSignal;
   /** Called on every poll while another live render holds the lock. */
   onWait?: (holder: { pid: number; since: string }) => void;
-  /** How often a waiter looks again, in ms. Default 500. */
+  /** How often a waiter looks again, in ms. Default 500; at most BEAT_MS / 2, so its sightings stay close together. */
   pollMs?: number;
   /** How often the holder beats, in ms. Default BEAT_MS; tests shorten these three. */
   beatMs?: number;
@@ -141,16 +143,29 @@ async function look(file: string): Promise<Look> {
   }
 }
 
-/** How long, on this process's monotonic clock, something has been seen with the same key. */
-class Watch {
+/**
+ * How long, on this process's monotonic clock, something has been watched with the same key.
+ * Only sightings close together count: after a gap longer than `gapMs` (a laptop asleep, which
+ * Windows' performance counter may count; this process stalled) the watch starts again, because
+ * nothing was watched in that gap and the holder's own beat may simply not have run yet.
+ */
+export class Watch {
   private key = "";
   private since = 0;
+  private last = 0;
+  private readonly gapMs: number;
+  private readonly now: () => number;
+  constructor(gapMs: number = BEAT_MS, now: () => number = () => performance.now()) {
+    this.gapMs = gapMs;
+    this.now = now;
+  }
   unchangedFor(key: string): number {
-    const now = performance.now();
-    if (key !== this.key) {
+    const now = this.now();
+    if (key !== this.key || now - this.last > this.gapMs) {
       this.key = key;
       this.since = now;
     }
+    this.last = now;
     return now - this.since;
   }
 }
@@ -289,7 +304,8 @@ function hold(file: string, me: Holder, beatMs: number): Held {
  * signal aborts first, `render-lock` when the folder cannot be written.
  */
 export async function acquireRenderLock(folder: string, options: LockOptions = {}): Promise<Held> {
-  const { signal, onWait, pollMs = 500, beatMs = BEAT_MS, staleMs = STALE_MS, unwrittenMs = UNWRITTEN_MS } = options;
+  const { signal, onWait, beatMs = BEAT_MS, staleMs = STALE_MS, unwrittenMs = UNWRITTEN_MS } = options;
+  const pollMs = Math.min(Math.max(Number(options.pollMs ?? 500) || 500, 1), BEAT_MS / 2);
   if (signal?.aborted) throw cancelled();
   const file = path.join(folder, LOCK_NAME);
   const me: Holder = { pid: process.pid, since: "", token: randomUUID() };
