@@ -34,13 +34,62 @@ function noFolder<T>(): Checked<T> {
   );
 }
 
-/** A comparison key: Windows and macOS compare paths without regard to case. */
+/**
+ * A comparison key for judging a path as written, before the file system is touched: Windows
+ * and macOS usually compare names without regard to case. It is only ever a conservative
+ * pre-check; what grants access is identity (insideAllowed), since a volume's own rule for
+ * equal names (a case-sensitive folder, its case table) is not JavaScript's toLowerCase.
+ */
 const key = (p: string) => (caseless ? path.resolve(p).toLowerCase() : path.resolve(p));
 
-/** True when `child` is `parent` or inside it. Both should be real paths. */
+/** True when `child` is `parent` or inside it, by key: the lexical pre-check only. */
 function within(child: string, parent: string): boolean {
   const rel = path.relative(key(parent), key(child));
   return rel === "" || (rel !== ".." && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel));
+}
+
+/** A file's identity on its volume: the volume and the file id. */
+export type StatId = (p: string) => Promise<{ dev: bigint; ino: bigint }>;
+const statId: StatId = (p) => stat(p, { bigint: true });
+
+/** Exactly `parent` or inside it, spelled as it is (no case folding: path.win32.relative folds case). */
+function exactlyWithin(child: string, parent: string): boolean {
+  return child === parent || child.startsWith(parent.endsWith(path.sep) ? parent : parent + path.sep);
+}
+
+/**
+ * True when the real path `real` is one of the allowed folders or inside one, decided by
+ * identity: `real` or one of its ancestors has the same bigint dev:ino as an allowed folder's
+ * real path. A case-only sibling, a Unicode case-mapping twin (U+212A beside k) or an 8.3 short
+ * name is judged by what it is on disk, never by how it is spelled. Each allowed folder is
+ * looked at once per call. A volume that gives no file ids (ino 0) falls back to the exact
+ * spelling of the real path, which is never folded.
+ */
+export async function insideAllowed(real: string, allowedReal: string[], st: StatId = statId): Promise<boolean> {
+  const ids = new Set<string>();
+  const exact: string[] = [];
+  for (const folder of allowedReal) {
+    try {
+      const id = await st(folder);
+      if (id.ino === 0n) exact.push(folder);
+      else ids.add(`${id.dev}:${id.ino}`);
+    } catch {
+      // Gone since: it grants nothing.
+    }
+  }
+  if (exact.some((folder) => exactlyWithin(real, folder))) return true;
+  if (ids.size === 0) return false;
+  for (let at = real; ; ) {
+    try {
+      const id = await st(at);
+      if (id.ino !== 0n && ids.has(`${id.dev}:${id.ino}`)) return true;
+    } catch {
+      // Unreadable: look further up.
+    }
+    const up = path.dirname(at);
+    if (up === at) return false;
+    at = up;
+  }
 }
 
 const withinAny = (child: string, folders: string[]) => folders.some((f) => within(child, f));
@@ -216,7 +265,7 @@ export async function readableRecording(
   } catch {
     return refuse("recording", `${absolute} was not found.`, "Check the path, and that the recording has finished saving.");
   }
-  if (!withinAny(real, realAllowed)) {
+  if (!(await insideAllowed(real, realAllowed))) {
     return refuse("folder", `${absolute} leads outside the allowed folders through a link.`, outsideFix(realAllowed));
   }
 
@@ -296,8 +345,10 @@ export async function outputFolder(allowed: string[]): Promise<Checked<string>> 
     if (!st.isDirectory()) {
       return refuse("output", `${target} is a file, not a folder.`, `Rename or move ${target} so a ${OUTPUT} folder can be made.`);
     }
+    // A link is decided by identity, never by comparing spellings (an 8.3 short name is no link).
     const real = await realpath(target);
-    if (key(real) !== key(target)) return linked;
+    const [own, at] = await Promise.all([lstat(target, { bigint: true }), stat(real, { bigint: true })]);
+    if (own.dev !== at.dev || own.ino !== at.ino) return linked;
     return { ok: true, value: real };
   } catch {
     return refuse("output", `${target} could not be read.`, `Check that ${first} can be written to.`);
@@ -374,9 +425,23 @@ async function exclusiveCreate(file: string): Promise<FileHandle | null> {
   return handle;
 }
 
+/**
+ * `folder`'s real path, refused when a link (a symlink or a Windows junction) is anywhere on
+ * it. Decided by lstat of every component and by the identity of `folder` and its real path,
+ * never by comparing their spellings: an 8.3 short name or a different case is not a link.
+ */
 async function realFolder(folder: string): Promise<string> {
-  const real = await realpath(folder);
-  if (key(real) !== key(folder)) throw new Error(`${folder} is a link; results are written only into real folders.`);
+  const declared = path.resolve(folder);
+  const linked = () => new Error(`${folder} is a link; results are written only into real folders.`);
+  for (let at = declared; ; ) {
+    if ((await lstat(at)).isSymbolicLink()) throw linked();
+    const up = path.dirname(at);
+    if (up === at) break;
+    at = up;
+  }
+  const real = await realpath(declared);
+  const [own, at] = await Promise.all([lstat(declared, { bigint: true }), stat(real, { bigint: true })]);
+  if (own.dev !== at.dev || own.ino !== at.ino) throw linked();
   return real;
 }
 

@@ -21,7 +21,7 @@ const windows = process.platform === "win32";
 type Progress = { phase: string; completed: number; total: number; message?: string };
 
 function temp(t: { after: (fn: () => void) => void }, prefix: string): string {
-  const folder = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+  const folder = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   t.after(() => fs.rmSync(folder, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }));
   return folder;
 }
@@ -324,7 +324,7 @@ describe("a render session on the agent page", { skip: TEST_ORIGIN ? false : "MO
   const ctx = (overrides: Partial<Parameters<typeof renderOnce>[1]> = {}) => context({ origin, allowed, data, ...overrides });
 
   before(async () => {
-    root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mm-session-live-")));
+    root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "mm-session-live-")));
     project = path.join(root, "project with spaces");
     data = path.join(root, "data");
     fs.mkdirSync(project);
@@ -386,7 +386,7 @@ describe("a render session on the agent page", { skip: TEST_ORIGIN ? false : "MO
 
   test("a folder on the recording's path swapped for a link to outside, between the check and the hand-off, is refused", async (t) => {
     const clips = path.join(project, "clips");
-    const outside = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mm-session-outside-")));
+    const outside = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "mm-session-outside-")));
     t.after(() => fs.rmSync(outside, { recursive: true, force: true }));
     fs.mkdirSync(clips);
     fs.copyFileSync(recording, path.join(clips, "take.mp4"));

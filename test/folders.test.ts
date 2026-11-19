@@ -10,7 +10,10 @@ import { pathToFileURL } from "node:url";
 import {
   allowedFolders,
   createOutput,
+  createPartial,
+  insideAllowed,
   outputFolder,
+  publishOutput,
   readableRecording,
   safeName,
 } from "../src/folders.ts";
@@ -473,4 +476,136 @@ test("safeName is linear: a 1,000,000-character run of dots, spaces or dashes ta
   const emoji = safeName(`${"😀".repeat(500_000)}.`, "fallback");
   assert.ok(emoji.length > 0 && Buffer.byteLength(emoji) <= 200 && !emoji.includes("\ufffd"));
   assert.equal(safeName(`${"a".repeat(1_000_000)}`, "fallback"), "a".repeat(120));
+});
+
+// ---- containment by identity, not by name ----
+
+test("the identity walk: inside only when an ancestor of the real path is an allowed folder by dev:ino", async () => {
+  const ids: Record<string, [bigint, bigint]> = {
+    [path.resolve("/work/Proj")]: [1n, 10n],
+    [path.resolve("/work/proj")]: [1n, 11n], // a case-only sibling, its own directory
+    [path.resolve("/work/proj/clip.mp4")]: [1n, 12n],
+    [path.resolve("/work/Proj/takes")]: [1n, 13n],
+    [path.resolve("/work/Proj/takes/clip.mp4")]: [1n, 14n],
+    [path.resolve("/work/LONGNA~1")]: [1n, 10n], // a short name of Proj: the same directory
+    [path.resolve("/work/LONGNA~1/clip.mp4")]: [1n, 15n],
+    [path.resolve("/work")]: [1n, 2n],
+    [path.resolve("/")]: [1n, 1n],
+    [path.resolve("/fat/Allowed")]: [2n, 0n], // no file ids here: only the exact real path counts
+    [path.resolve("/fat/Allowed/clip.mp4")]: [2n, 0n],
+    [path.resolve("/fat/allowed/clip.mp4")]: [2n, 0n],
+    [path.resolve("/fat")]: [2n, 0n],
+  };
+  const statted: string[] = [];
+  const statId = async (p: string) => {
+    statted.push(p);
+    const id = ids[path.resolve(p)];
+    if (!id) throw Object.assign(new Error(`no ${p}`), { code: "ENOENT" });
+    return { dev: id[0], ino: id[1] };
+  };
+  const inside = (p: string, allowed: string[]) => insideAllowed(path.resolve(p), allowed.map((a) => path.resolve(a)), statId);
+  assert.equal(await inside("/work/Proj/takes/clip.mp4", ["/work/Proj"]), true);
+  assert.equal(await inside("/work/proj/clip.mp4", ["/work/Proj"]), false);
+  assert.equal(await inside("/work/LONGNA~1/clip.mp4", ["/work/Proj"]), true);
+  assert.equal(await inside("/work/proj/clip.mp4", ["/work/Proj", "/nowhere"]), false, "a missing allowed folder grants nothing");
+  assert.equal(await inside("/fat/Allowed/clip.mp4", ["/fat/Allowed"]), true);
+  assert.equal(await inside("/fat/allowed/clip.mp4", ["/fat/Allowed"]), false);
+  assert.equal(await inside("/work/Proj/takes/clip.mp4", []), false);
+  // Each allowed folder is looked at once per call.
+  statted.length = 0;
+  await inside("/work/proj/clip.mp4", ["/work/Proj"]);
+  assert.equal(statted.filter((p) => path.resolve(p) === path.resolve("/work/Proj")).length, 1, JSON.stringify(statted));
+});
+
+/** Runs `fsutil` and says whether it worked. */
+function fsutil(...args: string[]): boolean {
+  try {
+    execFileSync("fsutil", args, { stdio: "ignore", windowsHide: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("a case-only sibling folder on a case-sensitive volume is outside", { skip: !windows && "per-directory case sensitivity is Windows' (Linux compares exactly already)" }, async (t) => {
+  const { dir } = sandbox(t);
+  const work = path.join(dir, "work");
+  fs.mkdirSync(work);
+  if (!fsutil("file", "setCaseSensitiveInfo", work, "enable")) {
+    t.skip("fsutil file setCaseSensitiveInfo is not permitted here");
+    return;
+  }
+  const allowedDir = path.join(work, "Proj");
+  fs.mkdirSync(allowedDir);
+  const clip = write(path.join(work, "proj", "clip.mp4"), MP4_HEADER);
+  assert.equal(fs.readdirSync(work).length, 2, "Proj and proj are two folders");
+  const allowed = await allowedFolders([allowedDir], {});
+  const result = await readableRecording(clip, allowed);
+  assert.equal(!result.ok && result.problems[0]!.code, "folder", JSON.stringify(result));
+  // Inside the allowed one is still read.
+  const own = write(path.join(allowedDir, "clip.mp4"), MP4_HEADER);
+  const ok = await readableRecording(own, allowed);
+  assert.equal(ok.ok && ok.value.path, own, JSON.stringify(ok));
+});
+
+test("a Kelvin-sign sibling (\u212Ait beside kit) is outside", async (t) => {
+  const { dir } = sandbox(t);
+  const allowedDir = path.join(dir, "kit");
+  fs.mkdirSync(allowedDir);
+  const twin = path.join(dir, "Kit");
+  try {
+    fs.mkdirSync(twin);
+  } catch {
+    t.skip("this volume treats \u212Ait and kit as one name");
+    return;
+  }
+  if (fs.readdirSync(dir).length !== 2) {
+    t.skip("this volume treats \u212Ait and kit as one name");
+    return;
+  }
+  const clip = write(path.join(twin, "clip.mp4"), MP4_HEADER);
+  const result = await readableRecording(clip, await allowedFolders([allowedDir], {}));
+  assert.equal(!result.ok && result.problems[0]!.code, "folder", JSON.stringify(result));
+});
+
+/** The 8.3 short name of `p`, or null when there is none (8.3 names disabled, or not Windows). */
+function shortName(p: string): string | null {
+  if (!windows) return null;
+  try {
+    const out = execFileSync("cmd", ["/d", "/s", "/c", `"for %I in ("${p}") do @echo %~sI"`], {
+      encoding: "utf8",
+      windowsHide: true,
+      windowsVerbatimArguments: true,
+    }).trim();
+    return out && out.toLowerCase() !== p.toLowerCase() && fs.existsSync(out) ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+test("a folder reached by its 8.3 short name is a real folder, not a link", { skip: !windows && "8.3 short names are Windows'" }, async (t) => {
+  const { dir } = sandbox(t);
+  const long = path.join(dir, "a project with a long name");
+  fs.mkdirSync(long);
+  const short = shortName(long);
+  if (!short) {
+    t.skip("8.3 short names are disabled on this volume");
+    return;
+  }
+  t.diagnostic(`${long} -> ${short}`);
+  // Writing: the partial, the published file and the output folder all work through the short name.
+  const partial = await createPartial(short, "film", "mp4");
+  await partial.handle.writeFile("film");
+  await partial.handle.close();
+  const published = await publishOutput(partial.path, "film", "mp4");
+  assert.equal(fs.readFileSync(published, "utf8"), "film");
+  const made = await createOutput(short, "other", "mp4");
+  await made.handle.close();
+  const out = await outputFolder([short]);
+  assert.equal(out.ok, true, JSON.stringify(out));
+  // Reading: a root declared by its short name accepts a recording written that way.
+  const clip = write(path.join(long, "clip.mp4"), MP4_HEADER);
+  const allowed = await allowedFolders([short], {});
+  const read = await readableRecording(path.join(short, "clip.mp4"), allowed);
+  assert.equal(read.ok && read.value.path, clip, JSON.stringify(read));
 });

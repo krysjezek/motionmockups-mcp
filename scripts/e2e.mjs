@@ -84,7 +84,7 @@ if (!fs.existsSync(BUNDLE)) {
 
 // ---- the temporary world ----
 
-const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mm-e2e-")));
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "mm-e2e-")));
 const project = path.join(root, "project with spaces");
 const outside = path.join(root, "outside");
 const data = path.join(root, "data");

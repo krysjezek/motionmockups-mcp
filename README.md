@@ -57,7 +57,11 @@ It needs Node.js 20 or later and Google Chrome (Chromium on Linux).
   render is refused (code `roots`) rather than saved in
   `MOTIONMOCKUPS_FOLDERS` alone; the next render asks the client again.
 - **Recordings** are read only from inside an allowed folder, after every
-  symlink and Windows junction is followed to where it really leads. Only
+  symlink and Windows junction is followed to where it really leads. Where
+  it leads counts as inside only when it is, on disk, an allowed folder or
+  inside one (the same volume and file id), never by how its name is
+  spelled, so a folder whose name differs only in case or by a look-alike
+  letter is outside. Only
   regular files are read, and only when their first bytes show an MP4 or MOV,
   WebM or MKV, PNG, JPEG, WebP or AVIF file under a matching name. Anything else is
   refused, and its contents are never read beyond those first bytes. A path

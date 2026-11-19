@@ -15,7 +15,7 @@ const PARTIAL = /^\.film\.mp4\.partial-[0-9a-f]{16}$/;
 const DAY = 24 * 60 * 60 * 1000;
 
 function folder(t: { after: (fn: () => void) => void }): string {
-  const dir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "mm-partial-")));
+  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "mm-partial-")));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 }));
   return dir;
 }

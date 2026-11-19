@@ -133,7 +133,7 @@ async function start(
 }
 
 function temp(t: TestContext, prefix: string): string {
-  const folder = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+  const folder = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
   t.after(() => fs.rmSync(folder, { recursive: true, force: true }));
   return folder;
 }
