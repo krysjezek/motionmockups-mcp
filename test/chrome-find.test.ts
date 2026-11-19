@@ -31,6 +31,34 @@ test("Windows: environment names are looked up without regard to case", () => {
   assert.deepEqual(findChrome(env, "win32", only(WIN.programFiles)), { ok: true, value: WIN.programFiles });
 });
 
+test("Windows: the MCP SDK's reduced environment still finds Program Files (x86)", () => {
+  // What @modelcontextprotocol/sdk's stdio client passes by default on Windows: no ProgramFiles(x86).
+  const sdkEnv = {
+    APPDATA: "C:\\Users\\ada\\AppData\\Roaming",
+    HOMEDRIVE: "C:",
+    HOMEPATH: "\\Users\\ada",
+    LOCALAPPDATA: "C:\\Users\\ada\\AppData\\Local",
+    PATH: "C:\\Windows\\system32",
+    PROCESSOR_ARCHITECTURE: "AMD64",
+    SYSTEMDRIVE: "C:",
+    SYSTEMROOT: "C:\\Windows",
+    TEMP: "C:\\Users\\ada\\AppData\\Local\\Temp",
+    USERNAME: "ada",
+    USERPROFILE: "C:\\Users\\ada",
+    PROGRAMFILES: "C:\\Program Files",
+  };
+  assert.deepEqual(findChrome(sdkEnv, "win32", only(WIN.x86)), { ok: true, value: WIN.x86 });
+  assert.deepEqual(findChrome(sdkEnv, "win32", only(WIN.x86, WIN.local)), { ok: true, value: WIN.x86 });
+  // Another system drive.
+  const d = "D:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe";
+  assert.deepEqual(findChrome({ ...sdkEnv, SYSTEMDRIVE: "D:" }, "win32", only(d)), { ok: true, value: d });
+});
+
+test("Windows: with no Program Files variables at all, the C: defaults are tried", () => {
+  assert.deepEqual(findChrome({}, "win32", only(WIN.programFiles)), { ok: true, value: WIN.programFiles });
+  assert.deepEqual(findChrome({}, "win32", only(WIN.x86)), { ok: true, value: WIN.x86 });
+});
+
 test("Windows: Chromium is not accepted", () => {
   const chromium = "C:\\Users\\ada\\AppData\\Local\\Chromium\\Application\\chrome.exe";
   assert.equal(findChrome({ ...WIN_ENV, PATH: "C:\\bin" }, "win32", only(chromium, "C:\\bin\\chromium.exe", "C:\\bin\\chromium")).ok, false);

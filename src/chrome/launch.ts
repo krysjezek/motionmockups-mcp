@@ -3,8 +3,9 @@
 // could reach). Every request outside the allowed hosts goes to a proxy that is
 // not there (127.0.0.1:9, the discard port), so it fails.
 
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 
 import { Cdp, problemError } from "./cdp.ts";
 
@@ -27,6 +28,7 @@ export interface Chrome {
 
 const START_TIMEOUT_MS = 30_000;
 const CLOSE_GRACE_MS = 5_000;
+const KILL_WAIT_MS = 5_000;
 const ALLOWED_HOSTS = ["assets.motionmockups.com", "*.r2.cloudflarestorage.com"];
 
 /**
@@ -52,25 +54,55 @@ export function chromeArgs(options: ChromeOptions): string[] {
     "--disable-renderer-backgrounding",
     "--proxy-server=http://127.0.0.1:9",
     `--proxy-bypass-list=${bypassList(options.origin)}`,
+    // WebRTC sends UDP around the HTTP proxy (STUN reaches any host). This policy gathers no
+    // UDP candidate at all; the `--force-webrtc-ip-handling-policy` spelling does not, on Chrome 156.
+    "--webrtc-ip-handling-policy=disable_non_proxied_udp",
     ...(options.mode === "headless" ? ["--headless"] : ["--window-position=-32000,-32000", "--window-size=1280,800"]),
     "about:blank",
   ];
 }
 
-/** Kills Chrome and every process it started. */
-function killTree(pid: number): Promise<void> {
+/** taskkill by its full path: the adapter's PATH is whatever the MCP client passed, maybe nothing. */
+function taskkillPath(): string {
+  const root = process.env.SYSTEMROOT?.trim() || process.env.windir?.trim() || "C:\\Windows";
+  return path.win32.join(path.win32.isAbsolute(root) ? root : "C:\\Windows", "System32", "taskkill.exe");
+}
+
+/** Kills Chrome and every process it started; falls back to killing Chrome alone. Always settles. */
+function killTree(child: ChildProcess): Promise<void> {
+  const pid = child.pid;
+  const alone = () => {
+    try {
+      child.kill("SIGKILL");
+    } catch {
+      // Already gone.
+    }
+  };
+  if (pid === undefined) return Promise.resolve();
   if (process.platform === "win32") {
     return new Promise((resolve) => {
-      execFile("taskkill", ["/T", "/F", "/PID", String(pid)], { windowsHide: true }, () => resolve());
+      execFile(taskkillPath(), ["/T", "/F", "/PID", String(pid)], { windowsHide: true, timeout: KILL_WAIT_MS }, (error) => {
+        if (error) alone();
+        resolve();
+      });
     });
   }
   try {
     process.kill(-pid, "SIGKILL"); // The process group: spawned with `detached: true`.
   } catch {
-    // Already gone.
+    alone();
   }
   return Promise.resolve();
 }
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const PROFILE_IN_USE = 21; // Chrome's RESULT_CODE_PROFILE_IN_USE.
+
+const exitDetail = (code: number | null, stderr: string) =>
+  code === PROFILE_IN_USE
+    ? "the profile is in use by another Chrome (exit code 21)."
+    : `it exited with code ${code}. ${stderr.trim()}`.trim();
 
 const startProblem = (detail: string) =>
   problemError(
@@ -93,6 +125,7 @@ export async function launchChrome(options: ChromeOptions): Promise<Chrome> {
   let stderr = "";
   child.stderr?.setEncoding("utf8");
   child.stderr?.on("data", (text: string) => (stderr = (stderr + text).slice(-2000)));
+  child.stderr?.on("error", () => {}); // A broken stderr pipe is not worth crashing the adapter for.
 
   let spawnError: Error | undefined;
   const exited = new Promise<number | null>((resolve) => {
@@ -119,9 +152,10 @@ export async function launchChrome(options: ChromeOptions): Promise<Chrome> {
           new Promise<false>((resolve) => (timer = setTimeout(() => resolve(false), CLOSE_GRACE_MS))),
         ]);
         clearTimeout(timer);
-        if (!graceful && child.pid !== undefined) {
-          await killTree(child.pid);
-          await exited;
+        if (!graceful) {
+          await killTree(child);
+          // Bounded: close() must settle even if nothing could end Chrome.
+          await Promise.race([exited, delay(KILL_WAIT_MS)]);
         }
       }
       cdp.close();
@@ -132,7 +166,7 @@ export async function launchChrome(options: ChromeOptions): Promise<Chrome> {
     await Promise.race([
       cdp.send("Browser.getVersion"),
       exited.then((code) => {
-        throw startProblem(spawnError ? spawnError.message : `it exited with code ${code}. ${stderr.trim()}`.trim());
+        throw startProblem(spawnError ? spawnError.message : exitDetail(code, stderr));
       }),
       new Promise((_, reject) => (timer = setTimeout(() => reject(startProblem(`no answer within ${START_TIMEOUT_MS / 1000} s.`)), START_TIMEOUT_MS))),
     ]);
@@ -140,8 +174,8 @@ export async function launchChrome(options: ChromeOptions): Promise<Chrome> {
     await close();
     if ((error as { code?: string }).code === "chrome-start") throw error;
     // The pipe closed because Chrome ended: say how it ended rather than "closed".
-    const code = await exited;
-    throw startProblem(spawnError ? spawnError.message : `it exited with code ${code}. ${stderr.trim()}`.trim());
+    const code = await Promise.race([exited, delay(KILL_WAIT_MS).then(() => null)]);
+    throw startProblem(spawnError ? spawnError.message : exitDetail(code, stderr));
   } finally {
     clearTimeout(timer);
   }

@@ -49,11 +49,23 @@ export class Cdp {
   send<T = unknown>(method: string, params: object = {}, sessionId?: string): Promise<T> {
     if (this.#closed) return Promise.reject(closedError());
     const id = this.#nextId++;
-    const message = sessionId ? { id, method, params, sessionId } : { id, method, params };
+    let text: string;
+    try {
+      text = JSON.stringify(sessionId ? { id, method, params, sessionId } : { id, method, params });
+    } catch (error) {
+      return Promise.reject(
+        problemError("cdp", `${method} could not be sent: ${(error as Error).message}`, "This is a bug in the adapter; please report it."),
+      );
+    }
     return new Promise<T>((resolve, reject) => {
       this.#pending.set(id, { resolve, reject, method });
-      this.#write.write(JSON.stringify(message) + "\0");
+      this.#write.write(text + "\0");
     });
+  }
+
+  /** How many sends are waiting for an answer. */
+  get pending(): number {
+    return this.#pending.size;
   }
 
   /** Listens for one event, from any session. Returns the unsubscribe. */

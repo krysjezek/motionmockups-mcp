@@ -129,6 +129,23 @@ test("a write error closes the connection instead of throwing", async () => {
   await assert.rejects(pending, (e: any) => e.code === "chrome-closed");
 });
 
+test("params that cannot be serialised reject the send, write nothing and leave no pending entry", async () => {
+  const { cdp, sent, reply, frame } = harness();
+  const circular: any = {};
+  circular.self = circular;
+  await assert.rejects(cdp.send("Bad.circular", circular), (e: any) => e.code === "cdp" && typeof e.fix === "string");
+  await assert.rejects(cdp.send("Bad.bigint", { n: 1n }), (e: any) => e.code === "cdp");
+  await tick();
+  assert.equal(sent.length, 0);
+  assert.equal(cdp.pending, 0);
+  const next = cdp.send("Good.good");
+  await tick();
+  reply(frame({ id: sent[0].id, result: { fine: true } }));
+  assert.deepEqual(await next, { fine: true });
+  assert.equal(cdp.pending, 0);
+  cdp.close();
+});
+
 test("a malformed frame is skipped, not fatal", async () => {
   const { cdp, reply, frame } = harness();
   const pending = cdp.send("A.a");

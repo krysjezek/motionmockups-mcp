@@ -42,10 +42,16 @@ function refuse(message: string): Checked<string> {
 function candidates(env: NodeJS.ProcessEnv, platform: NodeJS.Platform): string[] {
   if (platform === "win32") {
     const p = path.win32;
-    return ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"]
-      .map((name) => variable(env, name, platform))
-      .filter((base): base is string => !!base && p.isAbsolute(base))
-      .map((base) => p.join(base, ...WIN_APP));
+    // The MCP SDK's stdio client passes PROGRAMFILES but not ProgramFiles(x86) by default,
+    // so a missing variable falls back to its usual place on the system drive.
+    const drive = variable(env, "SYSTEMDRIVE", platform) ?? "C:";
+    const bases = [
+      variable(env, "ProgramFiles", platform) ?? `${drive}\\Program Files`,
+      variable(env, "ProgramFiles(x86)", platform) ?? `${drive}\\Program Files (x86)`,
+      variable(env, "LOCALAPPDATA", platform),
+    ];
+    const paths = bases.filter((base): base is string => !!base && p.isAbsolute(base)).map((base) => p.join(base, ...WIN_APP));
+    return [...new Set(paths)];
   }
   const p = path.posix;
   if (platform === "darwin") {
