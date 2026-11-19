@@ -25,6 +25,8 @@ export type ChromeMode = SessionContext["chromeMode"];
 /** Chrome without a window. Task 7 of the adapter plan measures whether `window` is needed. */
 export const DEFAULT_CHROME_MODE: ChromeMode = "headless";
 export const DEFAULT_TIMEOUT_MINUTES = 20;
+/** The shortest render timeout accepted from the setting. */
+const MIN_TIMEOUT_MS = 60_000;
 /** For the client's answer to `roots/list`. */
 const ROOTS_MS = 10_000;
 /** How long `stop()` waits for running renders to close Chrome and release the lock. */
@@ -46,15 +48,17 @@ export interface ServerDeps {
 /** `MOTIONMOCKUPS_TIMEOUT_MINUTES` and `MOTIONMOCKUPS_CHROME_MODE`, read strictly. */
 export function settingsFromEnv(env: NodeJS.ProcessEnv): Checked<{ timeoutMs: number; chromeMode: ChromeMode; warnings: string[] }> {
   const warnings: string[] = [];
-  let minutes = DEFAULT_TIMEOUT_MINUTES;
+  let timeoutMs = DEFAULT_TIMEOUT_MINUTES * 60_000;
   const rawTimeout = env.MOTIONMOCKUPS_TIMEOUT_MINUTES?.trim();
   if (rawTimeout) {
-    // Digits with an optional fraction only: no signs, exponents, hex or words.
-    const value = /^\d+(?:\.\d+)?$/.test(rawTimeout) ? Number(rawTimeout) : NaN;
-    if (Number.isFinite(value) && value > 0) minutes = value;
+    // Digits with an optional fraction only: no signs, exponents, hex or words. Checked as
+    // milliseconds, at least one minute: renderOnce reads 0 as no limit, and a tiny value
+    // would round to it.
+    const ms = /^\d+(?:\.\d+)?$/.test(rawTimeout) ? Math.round(Number(rawTimeout) * 60_000) : NaN;
+    if (Number.isFinite(ms) && ms >= MIN_TIMEOUT_MS) timeoutMs = ms;
     else
       warnings.push(
-        `MOTIONMOCKUPS_TIMEOUT_MINUTES is "${rawTimeout}", which is not a number of minutes above 0; renders stop after ${DEFAULT_TIMEOUT_MINUTES} minutes.`,
+        `MOTIONMOCKUPS_TIMEOUT_MINUTES is "${rawTimeout}", which is not a number of minutes, 1 or more; renders stop after ${DEFAULT_TIMEOUT_MINUTES} minutes.`,
       );
   }
   const rawMode = env.MOTIONMOCKUPS_CHROME_MODE?.trim().toLowerCase();
@@ -73,7 +77,7 @@ export function settingsFromEnv(env: NodeJS.ProcessEnv): Checked<{ timeoutMs: nu
       };
     chromeMode = rawMode;
   }
-  return { ok: true, value: { timeoutMs: Math.round(minutes * 60_000), chromeMode, warnings } };
+  return { ok: true, value: { timeoutMs, chromeMode, warnings } };
 }
 
 // ---- Tool inputs ----
@@ -164,6 +168,19 @@ const unexpected = (error: unknown): Problem => ({
   fix: "Try again. If it keeps failing, report it at https://motionmockups.com/contact.",
 });
 
+export const TOOL_NAMES = ["list_scenes", "recording_spec", "render", "still", "account"] as const;
+
+/** An error the SDK gives as a tool result, as a problem with a way out. */
+export function sdkProblem(message: string): Problem {
+  // The SDK's own wording (mcp.js validateToolInput and the tools/call handler), after the
+  // "MCP error -32602: " an McpError puts in front.
+  if (/(?:Input validation error|Invalid arguments for tool) /.test(message))
+    return { code: "input", message, fix: "Send the fields as the tool's input schema gives them, and no others." };
+  const tool = /Tool (\S+) (?:not found|disabled)$/.exec(message);
+  if (tool) return { code: "tool", message: `There is no tool ${tool[1]}.`, fix: `Use one of: ${TOOL_NAMES.join(", ")}.` };
+  return unexpected(message);
+}
+
 const ACCOUNT_NOTE =
   "Not signed in. Renders are free watermarked previews, for evaluation only. Signing in for clean output with Motion Mockups Pro is coming to this adapter.";
 
@@ -189,11 +206,12 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   const instructions = first.ok ? first.value.briefing : FALLBACK_BRIEFING;
 
   const server = new McpServer({ name: "motionmockups", version: deps.version }, { instructions, capabilities: { tools: {} } });
-  // The SDK answers an input its schema refuses (or a handler's throw) with a text-only error
-  // result. This gives it the adapter's shape, so every refusal carries { problems }. The hook
-  // is private in the SDK's types; the SDK is pinned and bundled, and the tests check it.
+  // The SDK answers an input its schema refuses, an unknown tool or a handler's throw with a
+  // text-only error result. This gives each the adapter's shape, so every refusal carries
+  // { problems }. The hook is private in the SDK's types; the SDK is pinned and bundled, and
+  // the tests check it.
   (server as unknown as { createToolError: (message: string) => CallToolResult }).createToolError = (message) =>
-    refused([{ code: "input", message, fix: "Send the fields as the tool's input schema gives them, and no others." }]);
+    refused([sdkProblem(message)]);
 
   // ---- Allowed folders: the client's roots, read again when they change, plus the setting ----
   let roots: Promise<string[]> | undefined;

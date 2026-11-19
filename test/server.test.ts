@@ -1,6 +1,6 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,7 +11,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ListRootsRequestSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 
 import { FALLBACK_BRIEFING, checkCatalog, type AgentCatalog } from "../src/catalog.ts";
-import { createServer, settingsFromEnv, type ServerDeps } from "../src/server.ts";
+import { createServer, sdkProblem, settingsFromEnv, type ServerDeps } from "../src/server.ts";
 import type { Rendered, RenderRequest, SessionContext } from "../src/session.ts";
 
 const ORIGIN = new URL("http://127.0.0.1:4173");
@@ -467,7 +467,9 @@ test("settings: timeout minutes and chrome mode, read strictly", () => {
   assert.deepEqual(ok({}), { timeoutMs: 20 * 60_000, chromeMode: "headless", warnings: [] });
   assert.equal(ok({ MOTIONMOCKUPS_TIMEOUT_MINUTES: "45" }).timeoutMs, 45 * 60_000);
   assert.equal(ok({ MOTIONMOCKUPS_TIMEOUT_MINUTES: " 2.5 " }).timeoutMs, 150_000);
-  for (const bad of ["0", "-3", "abc", "10m", "Infinity", "NaN", "1e3x", "0x10"]) {
+  assert.equal(ok({ MOTIONMOCKUPS_TIMEOUT_MINUTES: "1" }).timeoutMs, 60_000);
+  // Below a minute: a tiny value would round to 0 ms, which renderOnce reads as no limit.
+  for (const bad of ["0", "-3", "abc", "10m", "Infinity", "NaN", "1e3x", "0x10", "0.000001", "0.0000083", "0.5", "0.99"]) {
     const s = ok({ MOTIONMOCKUPS_TIMEOUT_MINUTES: bad });
     assert.equal(s.timeoutMs, 20 * 60_000, bad);
     assert.equal(s.warnings.length, 1, bad);
@@ -493,6 +495,57 @@ test("the command refuses to start on a bad MOTIONMOCKUPS_ORIGIN, saying why on 
   assert.match(run.stderr, /MOTIONMOCKUPS_ORIGIN/);
   assert.match(run.stderr, /not the Motion Mockups site/);
   assert.match(run.stderr, /Remove MOTIONMOCKUPS_ORIGIN/);
+});
+
+test("an unknown tool names the tools there are; other SDK errors are the adapter's", async (t) => {
+  const { client } = await start(t);
+  const result = await client.callTool({ name: "make_video", arguments: {} });
+  assert.equal(result.isError, true);
+  const [problem] = structured(result).problems;
+  assert.equal(problem.code, "tool");
+  assert.match(problem.message, /make_video/);
+  assert.equal(problem.fix, "Use one of: list_scenes, recording_spec, render, still, account.");
+
+  assert.equal(sdkProblem("MCP error -32602: Tool render disabled").code, "tool");
+  assert.equal(sdkProblem("MCP error -32602: Input validation error: Invalid arguments for tool render: x").code, "input");
+  assert.equal(
+    sdkProblem("MCP error -32602: Invalid arguments for tool render: arguments contain more than the maximum of 10 elements").code,
+    "input",
+  );
+  const other = sdkProblem("Cannot read properties of undefined");
+  assert.equal(other.code, "adapter");
+  assert.match(other.message, /Cannot read properties/);
+  assert.doesNotMatch(other.fix, /schema/);
+});
+
+test("the command shuts down cleanly when the client stops reading stdout", async () => {
+  // A closed port: the catalog fails fast and the server starts with the fallback.
+  const child = spawn(process.execPath, ["--experimental-strip-types", "--no-warnings", path.join(ROOT, "src", "cli.ts"), "mcp"], {
+    env: { ...process.env, MOTIONMOCKUPS_ORIGIN: "http://127.0.0.1:9" },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr.on("data", (chunk) => (stderr += chunk));
+  const exited = new Promise<number | null>((resolve) => child.once("exit", (code) => resolve(code)));
+  const send = (message: object) => child.stdin.write(`${JSON.stringify(message)}\n`);
+  send({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } },
+  });
+  // The first answer arrives, then the client's end of stdout goes away.
+  await new Promise<void>((resolve) => child.stdout.once("data", () => resolve()));
+  child.stdout.destroy();
+  send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  // Each answer now writes into a closed pipe.
+  for (let id = 2; id < 40; id++) send({ jsonrpc: "2.0", id, method: "tools/list" });
+  const timer = setTimeout(() => child.kill(), 15_000);
+  const code = await exited;
+  clearTimeout(timer);
+  child.stdin.destroy();
+  assert.equal(code, 0, stderr);
+  assert.doesNotMatch(stderr, /Unhandled|EPIPE|Error:/);
 });
 
 test("the command prints usage for anything but mcp and --version", () => {

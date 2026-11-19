@@ -7,7 +7,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 
 import { siteOrigin } from "./origin.ts";
 import { dataFolder } from "./paths.ts";
-import { createServer, settingsFromEnv } from "./server.ts";
+import { createServer, settingsFromEnv, type AdapterServer } from "./server.ts";
 import { renderOnce } from "./session.ts";
 import type { Problem } from "./folders.ts";
 
@@ -22,7 +22,11 @@ Usage: motionmockups mcp
 Runs the Motion Mockups MCP server on stdio, for an MCP client such as Claude Code, Cursor or Claude Desktop.`;
 
 const log = (line: string) => {
-  process.stderr.write(`${line}\n`);
+  try {
+    process.stderr.write(`${line}\n`);
+  } catch {
+    // stderr went with the client; there is no one left to tell.
+  }
 };
 
 const refuse = (problems: Problem[]) => {
@@ -34,6 +38,17 @@ async function mcp(): Promise<void> {
   // Nothing may write to stdout but the transport.
   console.log = console.info = console.debug = console.error;
 
+  // The client closing stdin, closing its end of stdout (EPIPE on a late progress message or
+  // answer), or a signal, cancels running renders: Chrome is closed and the lock released
+  // before the process ends. A write error is never left uncaught in the middle of that.
+  let adapter: AdapterServer | undefined;
+  let stopping: Promise<void> | undefined;
+  const shutdown = (code: number) => {
+    stopping ??= (adapter ? adapter.stop() : Promise.resolve()).finally(() => process.exit(code));
+  };
+  process.stderr.on("error", () => {});
+  process.stdout.on("error", () => shutdown(0));
+
   // A bad override stops here: never a silent fall back to the public site.
   const origin = siteOrigin(process.env);
   if (!origin.ok) return refuse(origin.problems);
@@ -41,7 +56,7 @@ async function mcp(): Promise<void> {
   if (!settings.ok) return refuse(settings.problems);
   for (const warning of settings.value.warnings) log(`motionmockups: ${warning}`);
 
-  const adapter = await createServer({
+  adapter = await createServer({
     origin: origin.value,
     env: process.env,
     fetch: globalThis.fetch,
@@ -52,13 +67,8 @@ async function mcp(): Promise<void> {
     version,
     log,
   });
-
-  // The client closing stdin, or a signal, cancels running renders: Chrome is closed and the
-  // lock released before the process ends.
-  let stopping: Promise<void> | undefined;
-  const shutdown = (code: number) => {
-    stopping ??= adapter.stop().finally(() => process.exit(code));
-  };
+  // stdout failed during the catalog fetch: the process is already on its way out.
+  if (stopping) return;
   process.stdin.once("end", () => shutdown(0));
   process.stdin.once("close", () => shutdown(0));
   process.once("SIGINT", () => shutdown(130));
