@@ -46,7 +46,7 @@ It needs Node.js 20 or later and Google Chrome (Chromium on Linux).
 | `MOTIONMOCKUPS_CHROME_MODE` | `headless` (the default) or `window`. See [Chrome mode](#chrome-mode). |
 | `MOTIONMOCKUPS_TIMEOUT_MINUTES` | How long one render may run, 1 minute or more. By default 20. |
 | `MOTIONMOCKUPS_DATA` | Where the adapter keeps its Chrome profile, its staging folder and the render lock. By default `%LOCALAPPDATA%\motionmockups` on Windows, `~/Library/Application Support/motionmockups` on macOS and `$XDG_DATA_HOME/motionmockups` or `~/.local/share/motionmockups` on Linux. |
-| `MOTIONMOCKUPS_ORIGIN` | For testing the site only: a local preview (`http://localhost:<port>`, `http://127.0.0.1:<port>`) or one of its Vercel previews. Anything else stops the server at start, so it never falls back to the public site by mistake. |
+| `MOTIONMOCKUPS_ORIGIN` | For testing the site only: a local preview on its own port (`http://localhost:<port>`, `http://127.0.0.1:<port>`; port 80 or no port is refused) or one of the site's Vercel previews in the owner's team (`https://motion-mockups-<preview>-krystofjezeks-projects.vercel.app`). Anything else stops the server at start, so it never falls back to the public site by mistake. |
 
 ## What it reads and writes
 

@@ -7,8 +7,11 @@ import type { Checked } from "./folders.ts";
 export const DEFAULT_ORIGIN = "https://motionmockups.com";
 
 const LOOPBACK = new Set(["localhost", "127.0.0.1"]);
-// A Vercel preview of the site's project: motion-mockups-<deployment>-<team>.vercel.app.
-const VERCEL_PREVIEW = /^motion-mockups-[a-z0-9]+(?:-[a-z0-9]+)*\.vercel\.app$/;
+// A Vercel preview of the site's project in the owner's team only:
+// motion-mockups-<deployment>-krystofjezeks-projects.vercel.app. Hostnames under vercel.app are
+// issued to every account by its own project and team names; the team suffix is what binds
+// a preview to the owner.
+const VERCEL_PREVIEW = /^motion-mockups-[a-z0-9]+(?:-[a-z0-9]+)*-krystofjezeks-projects\.vercel\.app$/;
 
 function refuse(value: string, why: string): Checked<URL> {
   return {
@@ -19,7 +22,7 @@ function refuse(value: string, why: string): Checked<URL> {
         message: `MOTIONMOCKUPS_ORIGIN is "${value}", which ${why}`,
         fix:
           `Remove MOTIONMOCKUPS_ORIGIN from this MCP server's settings to render on ${DEFAULT_ORIGIN}, or set it to ` +
-          "http://localhost:<port>, http://127.0.0.1:<port> or https://motion-mockups-<preview>.vercel.app.",
+          "http://localhost:<port>, http://127.0.0.1:<port> or https://motion-mockups-<preview>-krystofjezeks-projects.vercel.app.",
       },
     ],
   };
@@ -38,9 +41,12 @@ export function siteOrigin(env: NodeJS.ProcessEnv = process.env): Checked<URL> {
   if (url.username || url.password) return refuse(value, "carries a user name or password.");
   if (url.pathname !== "/" || url.search || url.hash) return refuse(value, "is not an origin alone (it has a path, query or fragment).");
   const host = url.hostname.toLowerCase();
-  const allowed =
-    (url.protocol === "http:" && LOOPBACK.has(host)) ||
-    (url.protocol === "https:" && !url.port && (VERCEL_PREVIEW.test(host) || url.origin === DEFAULT_ORIGIN));
+  if (url.protocol === "http:" && LOOPBACK.has(host)) {
+    // A local preview is let through on its own port only, so it names one (URL drops :80).
+    if (!url.port) return refuse(value, "names no port of its own; a local preview is reached on the port it runs on.");
+    return { ok: true, value: new URL(url.origin) };
+  }
+  const allowed = url.protocol === "https:" && !url.port && (VERCEL_PREVIEW.test(host) || url.origin === DEFAULT_ORIGIN);
   if (!allowed) return refuse(value, "is not the Motion Mockups site, a local preview of it or one of its Vercel previews.");
   return { ok: true, value: new URL(url.origin) };
 }

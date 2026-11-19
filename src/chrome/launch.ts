@@ -29,15 +29,19 @@ export interface Chrome {
 const START_TIMEOUT_MS = 30_000;
 const CLOSE_GRACE_MS = 5_000;
 const KILL_WAIT_MS = 5_000;
-const ALLOWED_HOSTS = ["assets.motionmockups.com", "*.r2.cloudflarestorage.com"];
+const ALLOWED_HOSTS = ["assets.motionmockups.com:443", "*.r2.cloudflarestorage.com:443"];
+
+/** `host:port`, with the scheme's default port spelled out: a rule without a port matches every port. */
+const hostAndPort = (url: URL) => `${url.hostname}:${url.port || (url.protocol === "https:" ? "443" : "80")}`;
 
 /**
  * The host rules. `<-loopback>` comes first and always: without it Chrome sends every
  * loopback request around the proxy, so a page could reach any local service. Rules
  * after it win, so a loopback origin is still reached (its own host and port only).
+ * Every rule names its port, so none of them re-opens a host's other ports.
  */
 function bypassList(origin: URL): string {
-  return ["<-loopback>", origin.host, ...ALLOWED_HOSTS].join(";");
+  return ["<-loopback>", hostAndPort(origin), ...ALLOWED_HOSTS].join(";");
 }
 
 export function chromeArgs(options: ChromeOptions): string[] {

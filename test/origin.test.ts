@@ -59,3 +59,36 @@ test("origin: anything else is refused with code origin", () => {
     assert.match(r.problems[0]!.fix, /MOTIONMOCKUPS_ORIGIN/);
   }
 });
+
+test("origin: a Vercel host is accepted only with the owner's team suffix", () => {
+  for (const given of [
+    "https://motion-mockups-k7te7knkw-krystofjezeks-projects.vercel.app",
+    "https://motion-mockups-app-git-main-krystofjezeks-projects.vercel.app",
+  ]) {
+    const r = origin(given);
+    assert.ok(r.ok, given);
+  }
+  for (const given of [
+    "https://motion-mockups-evil.vercel.app",
+    "https://motion-mockups-abc-otherteam.vercel.app",
+    "https://motion-mockups-app.vercel.app",
+    "https://motion-mockups-krystofjezeks-projects.vercel.app",
+    "https://motion-mockups-abc-krystofjezeks-projects-x.vercel.app",
+    "https://motion-mockups-abc-xkrystofjezeks-projects.vercel.app",
+  ]) {
+    const r = origin(given);
+    assert.equal(r.ok, false, given);
+    if (!r.ok) assert.equal(r.problems[0]!.code, "origin", given);
+  }
+});
+
+test("origin: a loopback origin needs its own port, never the default one", () => {
+  for (const given of ["http://localhost", "http://127.0.0.1", "http://localhost:80", "http://127.0.0.1:80/"]) {
+    const r = origin(given);
+    assert.equal(r.ok, false, given);
+    if (r.ok) continue;
+    assert.equal(r.problems[0]!.code, "origin", given);
+    assert.match(r.problems[0]!.message, /port/, given);
+    assert.match(r.problems[0]!.fix, /:<port>/, given);
+  }
+});

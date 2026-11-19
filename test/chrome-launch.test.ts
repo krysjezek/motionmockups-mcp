@@ -34,7 +34,7 @@ test("flags: the pipe, the profile, the proxy rule and the mode", () => {
     "--disable-backgrounding-occluded-windows",
     "--disable-renderer-backgrounding",
     "--proxy-server=http://127.0.0.1:9",
-    "--proxy-bypass-list=<-loopback>;motionmockups.com;assets.motionmockups.com;*.r2.cloudflarestorage.com",
+    "--proxy-bypass-list=<-loopback>;motionmockups.com:443;assets.motionmockups.com:443;*.r2.cloudflarestorage.com:443",
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--password-store=basic",
     "--use-mock-keychain",
@@ -56,7 +56,25 @@ test("flags: the pipe, the profile, the proxy rule and the mode", () => {
   assert.ok(window.includes("--window-size=1280,800"));
 
   const loopback = chromeArgs({ executable: "chrome", profile, origin: new URL("http://127.0.0.1:5173"), mode: "headless" });
-  assert.ok(loopback.includes("--proxy-bypass-list=<-loopback>;127.0.0.1:5173;assets.motionmockups.com;*.r2.cloudflarestorage.com"));
+  assert.ok(loopback.includes("--proxy-bypass-list=<-loopback>;127.0.0.1:5173;assets.motionmockups.com:443;*.r2.cloudflarestorage.com:443"));
+});
+
+test("flags: every bypass rule names its port, so none opens every port of a host", () => {
+  const profile = path.join(os.tmpdir(), "profile");
+  for (const [origin, rule] of [
+    ["http://127.0.0.1", "127.0.0.1:80"],
+    ["http://localhost:80", "localhost:80"],
+    ["http://localhost:4173", "localhost:4173"],
+    ["https://motionmockups.com", "motionmockups.com:443"],
+    ["https://motion-mockups-abc-krystofjezeks-projects.vercel.app", "motion-mockups-abc-krystofjezeks-projects.vercel.app:443"],
+  ] as const) {
+    const args = chromeArgs({ executable: "chrome", profile, origin: new URL(origin), mode: "headless" });
+    const flag = args.find((f) => f.startsWith("--proxy-bypass-list="))!;
+    const rules = flag.slice("--proxy-bypass-list=".length).split(";");
+    assert.equal(rules[0], "<-loopback>", origin);
+    assert.equal(rules[1], rule, origin);
+    for (const r of rules.slice(1)) assert.match(r, /:\d+$/, `${origin}: ${r}`);
+  }
 });
 
 // ---- the real Chrome ----
@@ -169,6 +187,15 @@ test("a loopback origin is reached; other ports and hosts are not", { skip }, as
   assert.equal(await evaluate(chrome.cdp, sessionId, reach("https://assets.motionmockups.com/robots.txt")), "reached");
   assert.match(String(await evaluate(chrome.cdp, sessionId, reach("https://example.com/"))), /^blocked/);
   assert.equal(await navigate(chrome.cdp, sessionId, `http://127.0.0.1:${otherPort}/`), "net::ERR_PROXY_CONNECTION_FAILED");
+  await chrome.close();
+});
+
+test("a loopback origin on the default port does not open the other ports", { skip }, async (t) => {
+  // siteOrigin refuses such an origin; the bypass rule must hold even if one got this far.
+  const chrome = await launch(t, new URL("http://127.0.0.1"));
+  const { sessionId } = await openPage(chrome.cdp);
+  assert.equal(await navigate(chrome.cdp, sessionId, `http://127.0.0.1:${otherPort}/`), "net::ERR_PROXY_CONNECTION_FAILED");
+  assert.equal(await navigate(chrome.cdp, sessionId, `http://localhost:${otherPort}/`), "net::ERR_PROXY_CONNECTION_FAILED");
   await chrome.close();
 });
 
