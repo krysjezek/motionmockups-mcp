@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { acquireRenderLock, isAlive, LOCK_NAME, STALE_MS, UNWRITTEN_MS } from "../src/lock.ts";
+import { acquireRenderLock, isAlive, LOCK_NAME, STALE_MS, type Held } from "../src/lock.ts";
 
 const FIXTURE = fileURLToPath(new URL("./fixtures/hold-lock.ts", import.meta.url));
 
@@ -156,18 +156,47 @@ test("a missing data folder is created", async (t) => {
   await held.release();
 });
 
-test("PID reuse: a live pid with no heartbeat for longer than STALE_MS is taken over", async (t) => {
+test("PID reuse: a live pid's lock is taken over only after this waiter watched it unchanged for staleMs", async (t) => {
   const folder = tempFolder(t);
   // process.ppid is alive and is not a lock holder: a crashed holder's pid now in use by something else.
-  writeLock(folder, foreign(process.ppid), STALE_MS + 5_000);
-  const held = await acquireRenderLock(folder, { pollMs: 20 });
+  // Its time looks hours old, which alone proves nothing (sleep, clock jump, skewed network folder).
+  writeLock(folder, foreign(process.ppid), 5 * 3_600_000);
+  const started = performance.now();
+  let acquiredAt = 0;
+  const pending = acquireRenderLock(folder, { pollMs: 20, staleMs: 400 }).then((held) => {
+    acquiredAt = performance.now();
+    return held;
+  });
+  await sleep(200);
+  assert.equal(fs.readFileSync(lockOf(folder), "utf8"), foreign(process.ppid), "taken over before staleMs of watching");
+  const held = await pending;
+  assert.ok(acquiredAt - started >= 400, `taken over after ${acquiredAt - started} ms`);
   assert.equal(JSON.parse(fs.readFileSync(lockOf(folder), "utf8")).pid, process.pid);
   await held.release();
 });
 
+test("a lock that looks hours old at first sight but then beats is never taken over", async (t) => {
+  const folder = tempFolder(t);
+  writeLock(folder, foreign(process.ppid), 5 * 3_600_000);
+  const beats = setInterval(() => {
+    const now = new Date();
+    fs.utimesSync(lockOf(folder), now, now);
+  }, 80);
+  t.after(() => clearInterval(beats));
+  const controller = new AbortController();
+  const waits: number[] = [];
+  const pending = acquireRenderLock(folder, { signal: controller.signal, pollMs: 20, staleMs: 300, onWait: (h) => waits.push(h.pid) });
+  await sleep(1_200);
+  controller.abort();
+  await assert.rejects(pending, { code: "cancelled" });
+  clearInterval(beats);
+  assert.ok(waits.length > 0);
+  assert.equal(fs.readFileSync(lockOf(folder), "utf8"), foreign(process.ppid));
+});
+
 test("a live pid with a recent heartbeat is waited for", async (t) => {
   const folder = tempFolder(t);
-  writeLock(folder, foreign(process.ppid), STALE_MS - 10_000);
+  writeLock(folder, foreign(process.ppid), 2 * STALE_MS); // the time alone never makes it stale
   const controller = new AbortController();
   const waits: number[] = [];
   const pending = acquireRenderLock(folder, { signal: controller.signal, pollMs: 20, onWait: (h) => waits.push(h.pid) });
@@ -186,6 +215,7 @@ test("the holder beats: the lock's modified time keeps moving while it is held",
   await sleep(250);
   const age = Date.now() - fs.statSync(lockOf(folder)).mtimeMs;
   assert.ok(age < 5_000, `the lock is ${age} ms old`);
+  assert.equal(held.lost.aborted, false);
   await held.release();
 });
 
@@ -202,10 +232,12 @@ test("an empty or unfinished lock is waited for briefly, then taken over", async
   assert.equal(waited, false);
   assert.equal(fs.readFileSync(lockOf(folder), "utf8"), "");
 
-  // Older than UNWRITTEN_MS: a crash mid-write. Taken over.
+  // Watched unchanged for unwrittenMs: a crash mid-write. Taken over.
   for (const content of ["", '{"pid": 12', "not json", JSON.stringify({ pid: -1, since: 3 })]) {
-    writeLock(folder, content, UNWRITTEN_MS + 1_000);
-    const held = await acquireRenderLock(folder, { pollMs: 20 });
+    writeLock(folder, content);
+    const started = performance.now();
+    const held = await acquireRenderLock(folder, { pollMs: 20, unwrittenMs: 100 });
+    assert.ok(performance.now() - started >= 100, content);
     assert.equal(JSON.parse(fs.readFileSync(lockOf(folder), "utf8")).pid, process.pid, content);
     await held.release();
   }
@@ -251,6 +283,38 @@ test("releasing leaves another process's lock in place, and twice is harmless", 
   await held.release();
   await held.release();
   assert.equal(fs.readFileSync(lockOf(folder), "utf8"), foreign(process.ppid));
+});
+
+/** Resolves with the lost reason, or rejects after `ms`. */
+function lostWithin(held: Held, ms: number): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`lost did not fire within ${ms} ms`)), ms);
+    held.lost.addEventListener("abort", () => (clearTimeout(timer), resolve(held.lost.reason)), { once: true });
+  });
+}
+
+test("lost fires when another token replaces the lock, and release then leaves it", async (t) => {
+  const folder = tempFolder(t);
+  const held = await acquireRenderLock(folder, { beatMs: 30 });
+  writeLock(folder, foreign(process.ppid));
+  const reason = await lostWithin(held, 2_000);
+  assert.equal(reason.code, "lock-lost");
+  assert.equal(typeof reason.fix, "string");
+  await held.release();
+  assert.equal(fs.readFileSync(lockOf(folder), "utf8"), foreign(process.ppid));
+});
+
+test("lost fires when the lock is deleted, and not after a release", async (t) => {
+  const folder = tempFolder(t);
+  const held = await acquireRenderLock(folder, { beatMs: 30 });
+  fs.unlinkSync(lockOf(folder));
+  assert.equal((await lostWithin(held, 2_000)).code, "lock-lost");
+  await held.release();
+
+  const second = await acquireRenderLock(folder, { beatMs: 30 });
+  await second.release();
+  await sleep(150);
+  assert.equal(second.lost.aborted, false);
 });
 
 test("the exit handler releases a lock left held", async (t) => {
