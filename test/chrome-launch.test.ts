@@ -69,7 +69,7 @@ test("flags: every bypass rule names its port, so none opens every port of a hos
     ["http://localhost:80", "localhost:80"],
     ["http://localhost:4173", "localhost:4173"],
     ["https://motionmockups.com", "motionmockups.com:443"],
-    ["https://motion-mockups-abc-krystofjezeks-projects.vercel.app", "motion-mockups-abc-krystofjezeks-projects.vercel.app:443"],
+    ["https://motion-mockups-k7te7knkw-krystofjezeks-projects.vercel.app", "motion-mockups-k7te7knkw-krystofjezeks-projects.vercel.app:443"],
   ] as const) {
     const args = chromeArgs({ executable: "chrome", profile, origin: new URL(origin), mode: "headless" });
     const flag = args.find((f) => f.startsWith("--proxy-bypass-list="))!;

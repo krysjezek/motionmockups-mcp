@@ -7,11 +7,15 @@ import type { Checked } from "./folders.ts";
 export const DEFAULT_ORIGIN = "https://motionmockups.com";
 
 const LOOPBACK = new Set(["localhost", "127.0.0.1"]);
-// A Vercel preview of the site's project in the owner's team only:
-// motion-mockups-<deployment>-krystofjezeks-projects.vercel.app. Hostnames under vercel.app are
-// issued to every account by its own project and team names; the team suffix is what binds
-// a preview to the owner.
-const VERCEL_PREVIEW = /^motion-mockups-[a-z0-9]+(?:-[a-z0-9]+)*-krystofjezeks-projects\.vercel\.app$/;
+// A Vercel preview of the site's project in the owner's team, in the two shapes Vercel gives
+// them: a deployment URL, motion-mockups-<9-character id>-krystofjezeks-projects.vercel.app (as
+// the app's docs/deployment.md records every one), and a branch URL,
+// motion-mockups-app-git-<branch>-krystofjezeks-projects.vercel.app. Hostnames under vercel.app
+// are issued to every account by its own project and team names, so this still rests on
+// Vercel's naming: on the team scope suffix staying the owner's, and on these shapes. If Vercel
+// changes them, or the owner sets a Preview Deployment Suffix (a domain of the owner's own),
+// this pattern is what to change.
+const VERCEL_PREVIEW = /^motion-mockups-(?:[a-z0-9]{9}|app-git-[a-z0-9-]+)-krystofjezeks-projects\.vercel\.app$/;
 
 function refuse(value: string, why: string): Checked<URL> {
   return {
@@ -22,7 +26,7 @@ function refuse(value: string, why: string): Checked<URL> {
         message: `MOTIONMOCKUPS_ORIGIN is "${value}", which ${why}`,
         fix:
           `Remove MOTIONMOCKUPS_ORIGIN from this MCP server's settings to render on ${DEFAULT_ORIGIN}, or set it to ` +
-          "http://localhost:<port>, http://127.0.0.1:<port> or https://motion-mockups-<preview>-krystofjezeks-projects.vercel.app.",
+          "http://localhost:<port>, http://127.0.0.1:<port> or a Vercel preview, https://motion-mockups-<9-character id>-krystofjezeks-projects.vercel.app or https://motion-mockups-app-git-<branch>-krystofjezeks-projects.vercel.app.",
       },
     ],
   };

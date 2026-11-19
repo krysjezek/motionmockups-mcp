@@ -23,7 +23,7 @@ test("origin: a local preview or a Vercel preview of the site is accepted", () =
     ["http://127.0.0.1:4173", "http://127.0.0.1:4173"],
     ["http://localhost:5173", "http://localhost:5173"],
     ["http://localhost:5173/", "http://localhost:5173"],
-    ["https://motion-mockups-abc-krystofjezeks-projects.vercel.app", "https://motion-mockups-abc-krystofjezeks-projects.vercel.app"],
+    ["https://motion-mockups-k7te7knkw-krystofjezeks-projects.vercel.app", "https://motion-mockups-k7te7knkw-krystofjezeks-projects.vercel.app"],
     ["https://motionmockups.com", "https://motionmockups.com"],
   ] as const) {
     const r = origin(given);
@@ -62,8 +62,13 @@ test("origin: anything else is refused with code origin", () => {
 
 test("origin: a Vercel host is accepted only with the owner's team suffix", () => {
   for (const given of [
+    // Deployment URLs as app docs/deployment.md records them: a 9-character id.
     "https://motion-mockups-k7te7knkw-krystofjezeks-projects.vercel.app",
+    "https://motion-mockups-5uc208zjc-krystofjezeks-projects.vercel.app",
+    "https://motion-mockups-5r4lpz2ip-krystofjezeks-projects.vercel.app",
+    // Branch URLs: <project>-git-<branch>-<scope>.
     "https://motion-mockups-app-git-main-krystofjezeks-projects.vercel.app",
+    "https://motion-mockups-app-git-fix-wave-2-krystofjezeks-projects.vercel.app",
   ]) {
     const r = origin(given);
     assert.ok(r.ok, given);
@@ -75,6 +80,12 @@ test("origin: a Vercel host is accepted only with the owner's team suffix", () =
     "https://motion-mockups-krystofjezeks-projects.vercel.app",
     "https://motion-mockups-abc-krystofjezeks-projects-x.vercel.app",
     "https://motion-mockups-abc-xkrystofjezeks-projects.vercel.app",
+    // Only the two shapes Vercel gives the owner's previews.
+    "https://motion-mockups-abc-krystofjezeks-projects.vercel.app",
+    "https://motion-mockups-k7te7knkw0-krystofjezeks-projects.vercel.app",
+    "https://motion-mockups-evil-preview-krystofjezeks-projects.vercel.app",
+    "https://motion-mockups-git-main-krystofjezeks-projects.vercel.app",
+    "https://motion-mockups-app-krystofjezeks-projects.vercel.app",
   ]) {
     const r = origin(given);
     assert.equal(r.ok, false, given);
