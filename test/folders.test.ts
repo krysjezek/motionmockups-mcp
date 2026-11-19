@@ -1,7 +1,8 @@
-import { test, type TestContext } from "node:test";
+import { mock, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -363,6 +364,73 @@ test("never overwrites", async (t) => {
   assert.equal(fs.readFileSync(path.join(dir, "kept.mp4"), "utf8"), "existing bytes");
   assert.equal(fs.readFileSync(path.join(dir, "kept (2).mp4"), "utf8"), "existing bytes 2");
   assert.equal(fs.readFileSync(second.path, "utf8"), "second");
+});
+
+test("a dangling link at the name is taken, and nothing is created where it points", async (t) => {
+  const { dir, link } = sandbox(t);
+  const out = path.join(dir, "motion-mockups");
+  fs.mkdirSync(out);
+  const target = path.join(dir, "elsewhere", "planted.txt");
+  fs.mkdirSync(path.dirname(target));
+  if (!link("file", target, path.join(out, "name.mp4"))) {
+    t.skip("this system cannot create file symlinks");
+    return;
+  }
+  const made = await createOutput(out, "name", "mp4");
+  await made.handle.write(Buffer.from("result"));
+  await made.handle.close();
+  assert.equal(made.path, path.join(out, "name (2).mp4"));
+  assert.equal(fs.existsSync(target), false, "the link target must not be created");
+  assert.ok(fs.lstatSync(path.join(out, "name.mp4")).isSymbolicLink(), "the planted link is left alone");
+});
+
+/**
+ * Replaces the fs/promises calls the rules use with ones that record their paths and never
+ * reach the file system for anything outside `dir` (so a test can never contact a network host).
+ */
+function spyOnFiles(t: TestContext, dir: string): string[] {
+  const touched: string[] = [];
+  for (const name of ["realpath", "stat", "lstat", "open", "access", "readFile"] as const) {
+    const original = fs.promises[name] as (...args: unknown[]) => Promise<unknown>;
+    mock.method(fs.promises, name, async (...args: unknown[]) => {
+      const target = String(args[0]);
+      touched.push(target);
+      if (!target.startsWith(dir)) throw Object.assign(new Error(`test spy refused ${target}`), { code: "EACCES" });
+      return original.apply(fs.promises, args);
+    });
+  }
+  syncBuiltinESMExports();
+  t.after(() => {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  return touched;
+}
+
+test("a network or device path is refused without touching the file system", async (t) => {
+  const { dir } = sandbox(t);
+  const root = path.join(dir, "project");
+  fs.mkdirSync(root);
+  const allowed = await allowedFolders([root], {});
+  const touched = spyOnFiles(t, dir);
+  const attempts = windows
+    ? [
+        String.raw`\\192.0.2.1\share\clip.mp4`,
+        "//192.0.2.1/share/clip.mp4",
+        String.raw`\\?\UNC\192.0.2.1\share\clip.mp4`,
+        "\\\\?\\" + path.join(root, "clip.mp4"),
+        "\\\\.\\" + path.join(root, "clip.mp4"),
+        "//?/" + path.join(root, "clip.mp4"),
+        "file://192.0.2.1/share/clip.mp4",
+        "file://attacker.example/share/clip.mp4",
+      ]
+    : ["//192.0.2.1/share/clip.mp4", "/net/192.0.2.1/clip.mp4", "file://192.0.2.1/share/clip.mp4", "file://attacker.example/share/clip.mp4"];
+  for (const attempt of attempts) {
+    const result = await readableRecording(attempt, allowed);
+    assert.equal(!result.ok && result.problems[0]!.code, "folder", `${attempt}: ${JSON.stringify(result)}`);
+  }
+  // Only the allowed folder itself is looked at (to confirm it is still there); never the agent's path.
+  assert.deepEqual([...new Set(touched)], [root], JSON.stringify(touched));
 });
 
 test("createOutput makes the name safe and refuses an odd extension", async (t) => {

@@ -62,6 +62,16 @@ function asAbsolute(entry: string): string | null {
   return absolute ? path.resolve(p) : null;
 }
 
+// Windows device and long-path forms (\\?\…, \\.\…, //?/…): never read.
+const DEVICE_PATH = /^[\\/]{2}[?.][\\/]/;
+
+/**
+ * How each allowed folder was declared, by its real path's key. A recording path is judged
+ * as written against these before the file system is touched, so a root declared through a
+ * link or a mapped drive still accepts paths written the way it was declared.
+ */
+const spellings = new Map<string, string[]>();
+
 async function realDirectory(p: string): Promise<string | null> {
   try {
     const real = await realpath(p);
@@ -86,6 +96,8 @@ export async function allowedFolders(roots: string[], env: NodeJS.ProcessEnv = p
     const real = await realDirectory(p);
     if (!real || path.parse(real).root === real) continue;
     const k = key(real);
+    const known = spellings.get(k) ?? [];
+    if (!known.some((s) => key(s) === key(p))) spellings.set(k, [...known, p]);
     if (seen.has(k)) continue;
     seen.add(k);
     out.push(real);
@@ -165,34 +177,45 @@ export async function readableRecording(
   const realAllowed = (await Promise.all(allowed.map(realDirectory))).filter((f): f is string => f !== null);
   if (realAllowed.length === 0) return noFolder();
 
+  // Nothing below touches the file system for the agent's path until it is known, as written,
+  // to lie inside an allowed folder: a network path (\\host\share, file://host/, /net/host)
+  // would otherwise make the system contact that host.
   let given = file.trim();
   if (/^file:/i.test(given)) {
+    let url: URL;
     try {
-      given = fileURLToPath(given);
+      url = new URL(given);
+    } catch {
+      return refuse("recording", `${given} is not a file path.`, "Give the recording's path on this computer.");
+    }
+    if (url.hostname && url.hostname.toLowerCase() !== "localhost") {
+      return refuse("folder", `${given} names another computer; only allowed folders on this one are read.`, outsideFix(realAllowed));
+    }
+    try {
+      given = fileURLToPath(url);
     } catch {
       return refuse("recording", `${given} is not a file path.`, "Give the recording's path on this computer.");
     }
   }
+  if (process.platform === "win32" && DEVICE_PATH.test(given)) {
+    return refuse("folder", `${given} is a device path; only allowed folders are read.`, outsideFix(realAllowed));
+  }
   const absolute = path.resolve(realAllowed[0]!, given);
-  // Judged on the real path; the path as written only words the refusal (a root may be reached through a link).
-  const writtenInside = withinAny(absolute, realAllowed) || withinAny(absolute, allowed);
-  const outside = () =>
-    refuse<{ path: string; kind: "video" | "image"; bytes: number }>(
-      "folder",
-      writtenInside
-        ? `${absolute} leads outside the allowed folders through a link.`
-        : `${absolute} is outside the allowed folders.`,
-      outsideFix(realAllowed),
-    );
+  // Spellings of the allowed folders as they were declared (a root reached through a link or a mapped drive).
+  const declared = realAllowed.flatMap((f) => spellings.get(key(f)) ?? []);
+  if (!withinAny(absolute, [...realAllowed, ...allowed, ...declared])) {
+    return refuse("folder", `${absolute} is outside the allowed folders.`, outsideFix(realAllowed));
+  }
 
   let real: string;
   try {
     real = await realpath(absolute);
   } catch {
-    if (!writtenInside) return outside();
     return refuse("recording", `${absolute} was not found.`, "Check the path, and that the recording has finished saving.");
   }
-  if (!withinAny(real, realAllowed)) return outside();
+  if (!withinAny(real, realAllowed)) {
+    return refuse("folder", `${absolute} leads outside the allowed folders through a link.`, outsideFix(realAllowed));
+  }
 
   const notRecording = (why: string) =>
     refuse<{ path: string; kind: "video" | "image"; bytes: number }>(
@@ -320,11 +343,32 @@ export async function createOutput(folder: string, name: string, ext: string): P
   const flags = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0);
   for (let n = 1; n <= 9999; n++) {
     const file = path.join(real, `${n === 1 ? base : `${base} (${n})`}.${extension}`);
+    // Any entry already there is taken, a link (even a dangling one) included: Windows has no
+    // O_NOFOLLOW, and its exclusive create follows a dangling link to wherever it points.
     try {
-      return { path: file, handle: await open(file, flags, 0o644) };
+      await lstat(file);
+      continue;
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    let handle: FileHandle;
+    try {
+      handle = await open(file, flags, 0o644);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+      throw error;
+    }
+    // A link planted between the check and the create: the file opened is not the entry at the name.
+    try {
+      const [opened, entry] = await Promise.all([handle.stat({ bigint: true }), lstat(file, { bigint: true })]);
+      if (entry.isSymbolicLink() || !entry.isFile() || opened.ino !== entry.ino || opened.dev !== entry.dev) {
+        throw new Error(`${file} changed while it was being created; nothing was written.`);
+      }
+    } catch (error) {
+      await handle.close().catch(() => {});
+      throw error;
+    }
+    return { path: file, handle };
   }
   throw new Error(`${folder} already holds 9999 files named ${base}.`);
 }

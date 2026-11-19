@@ -44,7 +44,10 @@ It needs Node.js 20 or later and Google Chrome (Chromium on Linux).
   symlink and Windows junction is followed to where it really leads. Only
   regular files are read, and only when their first bytes show an MP4 or MOV,
   WebM, PNG, JPEG, WebP or AVIF file under a matching name. Anything else is
-  refused, and its contents are never read beyond those first bytes.
+  refused, and its contents are never read beyond those first bytes. A path
+  that is not written inside an allowed folder is refused before the adapter
+  looks it up, so a network path (`\\server\share`, `file://server/`) never
+  makes your computer contact that server.
 - **Results** go only into `motion-mockups/` inside the first allowed folder.
   An existing file is never replaced: a taken name gets ` (2)`, ` (3)` and so
   on. Names are cleaned so they stay inside that folder on every system. A
