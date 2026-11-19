@@ -16,6 +16,7 @@ jobs:
         os: [windows-latest, macos-latest, ubuntu-latest]
         node: [20, 24]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -28,8 +29,11 @@ jobs:
       # have. On Node 20 the built bundle is checked by the smoke test below instead.
       # GitHub's runners have Chrome installed, so the Chrome launch tests run; the render
       # session tests skip without MOTIONMOCKUPS_TEST_ORIGIN, and the e2e is not run here.
+      # Linux runners have no display: xvfb-run gives window-mode Chrome one.
       - run: npm test
-        if: matrix.node != 20
+        if: matrix.node != 20 && runner.os != 'Linux'
+      - run: xvfb-run -a npm test
+        if: matrix.node != 20 && runner.os == 'Linux'
       - run: npm run build
       - run: node scripts/smoke.mjs
       - run: npm pack --dry-run

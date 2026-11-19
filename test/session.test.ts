@@ -202,10 +202,20 @@ test("waiting for another render reports the wait, and cancelling the wait gives
 
 // ---- Chrome already on the shared profile (Chrome needed, no site) ----
 
+// A Chrome window needs a display: on Linux without X or Wayland (a CI runner without
+// xvfb-run) window mode cannot start at all.
+const noDisplay = process.platform === "linux" && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+
 for (const mode of ["headless", "window"] as const) {
   test(
     `Chrome already running on the shared profile (${mode}) is refused as busy, never "install Chrome"`,
-    { skip: found.ok ? false : "no Google Chrome on this machine" },
+    {
+      skip: !found.ok
+        ? "no Google Chrome on this machine"
+        : mode === "window" && noDisplay
+          ? "window mode needs a display: no DISPLAY or WAYLAND_DISPLAY (run under xvfb-run)"
+          : false,
+    },
     async (t: TestContext) => {
       const project = temp(t, "mm-session-project-");
       const data = temp(t, "mm-session-data-");

@@ -86,8 +86,8 @@ It needs Node.js 20 or later and Google Chrome (Chromium on Linux).
   cancel, Chrome is closed, staged files are removed and the lock is
   released. Files already saved stay and are listed in the refusal.
 - When the adapter is killed outright, Chrome loses its control pipe and
-  closes too. Measured on Windows: no Chrome of the adapter's was left 0.8 s
-  after `taskkill /F`, and 1.4 s after the client closed it mid-render.
+  closes too. Measured on Windows: no Chrome of the adapter's was left 0.6 s
+  after `taskkill /F`, and 1.2 s after the client closed it mid-render.
 
 ## Chrome mode
 
@@ -101,20 +101,24 @@ two-clip iPhone film, 75 frames at 720 × 404):
 | | headless | window |
 |---|---|---|
 | Frames | 75 | 75 |
-| Bitrate | 2,564 kb/s | 2,564 kb/s |
-| File size | 801,128 bytes | 801,128 bytes |
+| Bitrate | 2,564 kb/s, both runs | 2,539 and 2,532 kb/s |
+| File size | 801,128 bytes, both runs | 793,322 and 791,345 bytes |
 | SSIM against the page's own render, either side of the cut | 0.9939 / 0.9962 | 0.9939 / 0.9962 |
-| SSIM over all frames, lowest / mean | 0.9932 / 0.9946 | 0.9932 / 0.9946 |
-| Render time, Chrome start to saved file | 2.3 s, 2.2 s | 2.5 s, 2.5 s |
+| SSIM over all frames, lowest / mean | 0.9932 / 0.9946 | 0.9931 / 0.9946 |
+| Render time: the whole `render` call, from request to answer (Chrome start, page load, render and save) | 2.3 s, 2.3 s | 2.4 s, 2.4 s |
 | Window in front kept focus | yes | yes |
 
-Both modes give the same film in the same time, so headless stays the
-default. The page's own render is the site's verification script driving
+Both modes give the same frames at the same quality in the same time, so
+headless stays the default. Headless wrote 801,128 bytes in every run so
+far; window mode did too in the earlier runs, and 791–793 kB in this one,
+with the same SSIM. The page's own render is the site's verification script driving
 the same page in Playwright. For the focus check the foreground window was
 logged every 30 ms from before Chrome started until a second after it
 closed; it never changed. The window in front was another app in use at the
 time (Windows did not let the test bring its own window forward), and the
 run was started from a process in the background, not from the app in front.
+Not measured: an MCP client that is itself in front starting the adapter,
+which may let a window-mode Chrome take focus.
 
 ## Watermarked results
 

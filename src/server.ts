@@ -24,8 +24,8 @@ export type ChromeMode = SessionContext["chromeMode"];
 
 /**
  * Chrome without a window. Measured by scripts/e2e.mjs (e2e-results.json): on Windows with
- * Chrome 156, headless and window mode give the same film (same frames, bitrate and size, SSIM
- * 0.993 or more against the page's own render) in the same time, so nothing needs a window.
+ * Chrome 156, headless and window mode give the same frames at the same quality (SSIM 0.993 or
+ * more against the page's own render) in the same time, so nothing needs a window.
  */
 export const DEFAULT_CHROME_MODE: ChromeMode = "headless";
 export const DEFAULT_TIMEOUT_MINUTES = 20;

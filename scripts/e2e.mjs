@@ -117,6 +117,13 @@ function probe(file) {
   };
 }
 
+/** Every video frame's presentation time in seconds, in order. */
+const frameTimes = (file) =>
+  ffprobe(["-select_streams", "v:0", "-show_entries", "frame=pts_time", "-of", "csv=p=0", file])
+    .split(/\r?\n/)
+    .map((line) => Number(line.replace(/,$/, "")))
+    .filter((t) => Number.isFinite(t));
+
 /** Per-frame SSIM (All) of two equal-sized videos, by ffmpeg's ssim filter. */
 function ssimPerFrame(a, b) {
   const stats = `ssim-${createHash("sha1").update(a + b).digest("hex").slice(0, 8)}.log`;
@@ -603,12 +610,30 @@ try {
       reference = probe(REFERENCE);
       const p = probe(film);
       const c = compare(film);
-      results.equality = { reference: { file: REFERENCE, ...reference }, film: p, sides: c.sides, min: c.min, mean: c.mean };
+      // Every frame's presentation time, equal within half a frame.
+      const filmTimes = frameTimes(film);
+      const pageTimes = frameTimes(REFERENCE);
+      const worst = filmTimes.length === pageTimes.length ? filmTimes.reduce((w, t, i) => Math.max(w, Math.abs(t - pageTimes[i])), 0) : Infinity;
+      const timesMatch = worst <= 0.5 / fps;
+      results.equality = {
+        reference: { file: REFERENCE, ...reference },
+        film: p,
+        timestamps: { film: filmTimes.length, page: pageTimes.length, worstDifference: worst, allowed: 0.5 / fps },
+        sides: c.sides,
+        min: c.min,
+        mean: c.mean,
+      };
       pass(
         "equality with the page",
-        p.frames === reference.frames && p.width === reference.width && p.height === reference.height && c.sides.every((s) => s.ssim >= 0.97),
+        p.frames === reference.frames &&
+          p.width === reference.width &&
+          p.height === reference.height &&
+          timesMatch &&
+          c.sides.every((s) => s.ssim >= 0.97) &&
+          c.min >= 0.97,
         `${p.frames} frames vs the page's ${reference.frames}, ${p.width}x${p.height} vs ${reference.width}x${reference.height}; ` +
-          `SSIM either side of the cut ${c.sides.map((s) => `f${s.frame} ${s.ssim}`).join(", ")} (needs ≥ 0.97); all frames min ${c.min}, mean ${c.mean}`,
+          `frame times ${filmTimes.length} vs ${pageTimes.length}, worst difference ${Number.isFinite(worst) ? `${round(worst, 6)} s` : "counts differ"} (≤ ${round(0.5 / fps, 6)} s allowed); ` +
+          `SSIM either side of the cut ${c.sides.map((s) => `f${s.frame} ${s.ssim}`).join(", ")}, all frames min ${c.min}, mean ${c.mean} (every frame needs ≥ 0.97)`,
       );
     });
 
@@ -684,7 +709,7 @@ try {
     }
     const quality = (mode) => {
       const r = modes[mode]?.runs[0];
-      return !!r && !r.refused && r.frames === frames && (!REFERENCE || r.ssimSides.every((s) => s.ssim >= 0.97));
+      return !!r && !r.refused && r.frames === frames && (!REFERENCE || (r.ssimSides.every((s) => s.ssim >= 0.97) && r.ssimMin >= 0.97));
     };
     const headlessOk = quality("headless");
     const windowOk = quality("window");
