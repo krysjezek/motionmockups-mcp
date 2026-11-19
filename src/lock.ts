@@ -310,7 +310,8 @@ export async function acquireRenderLock(folder: string, options: LockOptions = {
   const file = path.join(folder, LOCK_NAME);
   const me: Holder = { pid: process.pid, since: "", token: randomUUID() };
   try {
-    await mkdir(folder, { recursive: true });
+    // The person's alone: the lock, staging and Chrome profile live here.
+    await mkdir(folder, { recursive: true, mode: 0o700 });
   } catch (error) {
     throw lockProblem(folder, (error as Error).message);
   }

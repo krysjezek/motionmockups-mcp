@@ -1,8 +1,9 @@
-import { after, before, describe, test, type TestContext } from "node:test";
+import { after, before, describe, mock, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import http from "node:http";
+import { syncBuiltinESMExports } from "node:module";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -272,6 +273,40 @@ test(
     assert.equal(fs.existsSync(path.join(data, LOCK_NAME)), false, "the lock was released");
   },
 );
+
+test("staging and the Chrome profile are created for the person alone (mode 0o700)", { skip: found.ok ? false : "no Google Chrome on this machine" }, async (t: TestContext) => {
+  const project = temp(t, "mm-session-project-");
+  const data = path.join(temp(t, "mm-session-data-"), "fresh");
+  const made: { path: string; mode: unknown }[] = [];
+  const original = fs.promises.mkdir;
+  const originalSync = fs.mkdirSync;
+  mock.method(fs.promises, "mkdir", (p: fs.PathLike, options?: any) => {
+    made.push({ path: String(p), mode: options?.mode });
+    return original.call(fs.promises, p, options);
+  });
+  mock.method(fs, "mkdirSync", (p: fs.PathLike, options?: any) => {
+    made.push({ path: String(p), mode: options?.mode });
+    return originalSync.call(fs, p, options);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  const closed = await new Promise<number>((resolve) => {
+    const server = net.createServer().listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as net.AddressInfo;
+      server.close(() => resolve(port));
+    });
+  });
+  await renderOnce({ plan: PLAN }, context({ allowed: [project], data, origin: new URL(`http://127.0.0.1:${closed}`) }));
+  for (const folder of [data, path.join(data, "staging"), path.join(data, "chrome-profile")]) {
+    const call = made.find((m) => m.path === folder);
+    assert.ok(call, `${folder} was not created: ${JSON.stringify(made)}`);
+    assert.equal(call.mode, 0o700, folder);
+    if (!windows) assert.equal(fs.statSync(folder).mode & 0o777, 0o700, folder);
+  }
+});
 
 // ---- Chrome already on the shared profile (Chrome needed, no site) ----
 

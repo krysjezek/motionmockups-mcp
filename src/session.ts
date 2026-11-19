@@ -517,7 +517,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
 
     // 3. Chrome on the adapter's own profile.
     report({ phase: "starting", completed: 0, total: 1, message: "Opening Chrome." });
-    await mkdir(staging, { recursive: true });
+    await mkdir(staging, { recursive: true, mode: 0o700 });
     launching = (context.launch ?? launchChrome)({ executable: executable.value, profile, origin: context.origin, mode: context.chromeMode });
     try {
       chrome = await until(launching, signal, Infinity, () => new Error("unreachable"));

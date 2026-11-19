@@ -448,19 +448,41 @@ test("createOutput makes the name safe and refuses an odd extension", async (t) 
 });
 
 test("dataFolder per platform, with MOTIONMOCKUPS_DATA winning", () => {
+  const folder = (...args: Parameters<typeof dataFolder>) => {
+    const r = dataFolder(...args);
+    assert.ok(r.ok, JSON.stringify(r));
+    return r.value;
+  };
   assert.equal(
-    dataFolder({ LOCALAPPDATA: "C:\\Users\\a\\AppData\\Local", USERPROFILE: "C:\\Users\\a" }, "win32"),
+    folder({ LOCALAPPDATA: "C:\\Users\\a\\AppData\\Local", USERPROFILE: "C:\\Users\\a" }, "win32"),
     "C:\\Users\\a\\AppData\\Local\\motionmockups",
   );
-  assert.equal(dataFolder({ USERPROFILE: "C:\\Users\\a" }, "win32"), "C:\\Users\\a\\AppData\\Local\\motionmockups");
-  assert.equal(dataFolder({ HOME: "/Users/a" }, "darwin"), "/Users/a/Library/Application Support/motionmockups");
-  assert.equal(dataFolder({ HOME: "/home/a", XDG_DATA_HOME: "/data/xdg" }, "linux"), "/data/xdg/motionmockups");
-  assert.equal(dataFolder({ HOME: "/home/a" }, "linux"), "/home/a/.local/share/motionmockups");
+  assert.equal(folder({ USERPROFILE: "C:\\Users\\a" }, "win32"), "C:\\Users\\a\\AppData\\Local\\motionmockups");
+  assert.equal(folder({ HOME: "/Users/a" }, "darwin"), "/Users/a/Library/Application Support/motionmockups");
+  assert.equal(folder({ HOME: "/home/a", XDG_DATA_HOME: "/data/xdg" }, "linux"), "/data/xdg/motionmockups");
+  assert.equal(folder({ HOME: "/home/a" }, "linux"), "/home/a/.local/share/motionmockups");
   // A relative XDG_DATA_HOME is invalid by the spec and ignored.
-  assert.equal(dataFolder({ HOME: "/home/a", XDG_DATA_HOME: "xdg" }, "linux"), "/home/a/.local/share/motionmockups");
-  assert.equal(dataFolder({ HOME: "/home/a", MOTIONMOCKUPS_DATA: "/tmp/mm" }, "linux"), "/tmp/mm");
-  assert.equal(dataFolder({ LOCALAPPDATA: "C:\\L", MOTIONMOCKUPS_DATA: "D:\\mm" }, "win32"), "D:\\mm");
-  assert.equal(typeof dataFolder(), "string");
+  assert.equal(folder({ HOME: "/home/a", XDG_DATA_HOME: "xdg" }, "linux"), "/home/a/.local/share/motionmockups");
+  assert.equal(folder({ HOME: "/home/a", MOTIONMOCKUPS_DATA: "/tmp/mm" }, "linux"), "/tmp/mm");
+  assert.equal(folder({ LOCALAPPDATA: "C:\\L", MOTIONMOCKUPS_DATA: "D:\\mm" }, "win32"), "D:\\mm");
+  assert.equal(typeof folder(), "string");
+});
+
+test("a relative MOTIONMOCKUPS_DATA is refused, never resolved against wherever the client started the adapter", () => {
+  for (const [value, platform] of [
+    ["mm-data", "linux"],
+    ["./mm", "darwin"],
+    ["mm-data", "win32"],
+    ["\\mm", "win32"], // relative to the current drive
+    ["C:mm", "win32"], // relative to drive C's current folder
+  ] as const) {
+    const r = dataFolder({ HOME: "/home/a", LOCALAPPDATA: "C:\\L", MOTIONMOCKUPS_DATA: value }, platform);
+    assert.equal(r.ok, false, `${platform} ${value}`);
+    if (r.ok) continue;
+    assert.equal(r.problems[0]!.code, "data");
+    assert.match(r.problems[0]!.message, /MOTIONMOCKUPS_DATA/);
+    assert.match(r.problems[0]!.fix, /absolute/);
+  }
 });
 
 test("safeName is linear: a 1,000,000-character run of dots, spaces or dashes takes well under 100 ms", () => {

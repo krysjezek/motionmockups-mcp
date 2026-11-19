@@ -1,9 +1,10 @@
-import { test } from "node:test";
+import { mock, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { syncBuiltinESMExports } from "node:module";
 import { fileURLToPath } from "node:url";
 
 import { acquireRenderLock, BEAT_MS, isAlive, LOCK_NAME, STALE_MS, Watch, type Held } from "../src/lock.ts";
@@ -17,6 +18,28 @@ function tempFolder(t: { after: (fn: () => void) => void }): string {
 }
 
 const lockOf = (folder: string) => path.join(folder, LOCK_NAME);
+
+test("the data folder is created for the person alone (mode 0o700)", async (t) => {
+  const parent = tempFolder(t);
+  const data = path.join(parent, "data", "motionmockups");
+  const calls: { path: string; options: unknown }[] = [];
+  const original = fs.promises.mkdir;
+  mock.method(fs.promises, "mkdir", (p: fs.PathLike, options?: unknown) => {
+    calls.push({ path: String(p), options });
+    return original.call(fs.promises, p, options as fs.MakeDirectoryOptions);
+  });
+  syncBuiltinESMExports();
+  t.after(() => {
+    mock.restoreAll();
+    syncBuiltinESMExports();
+  });
+  const held = await acquireRenderLock(data);
+  await held.release();
+  const made = calls.find((c) => c.path === data);
+  assert.ok(made, JSON.stringify(calls));
+  assert.equal((made.options as { mode?: number })?.mode, 0o700, JSON.stringify(made));
+  if (process.platform !== "win32") assert.equal(fs.statSync(data).mode & 0o777, 0o700);
+});
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** The pid of a process that has already exited. */

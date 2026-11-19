@@ -554,6 +554,19 @@ test("the command refuses to start on a bad MOTIONMOCKUPS_ORIGIN, saying why on 
   assert.match(run.stderr, /Remove MOTIONMOCKUPS_ORIGIN/);
 });
 
+test("the command refuses to start on a relative MOTIONMOCKUPS_DATA, saying why on stderr", () => {
+  const run = spawnSync(process.execPath, ["--experimental-strip-types", "--no-warnings", path.join(ROOT, "src", "cli.ts"), "mcp"], {
+    env: { ...process.env, MOTIONMOCKUPS_DATA: "relative-data" },
+    input: "",
+    encoding: "utf8",
+    timeout: 30_000,
+  });
+  assert.notEqual(run.status, 0);
+  assert.equal(run.stdout, "");
+  assert.match(run.stderr, /MOTIONMOCKUPS_DATA/);
+  assert.match(run.stderr, /absolute/);
+});
+
 test("an unknown tool names the tools there are; other SDK errors are the adapter's", async (t) => {
   const { client } = await start(t);
   const result = await client.callTool({ name: "make_video", arguments: {} });

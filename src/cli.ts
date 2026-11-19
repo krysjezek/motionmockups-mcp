@@ -55,13 +55,15 @@ async function mcp(): Promise<void> {
   const settings = settingsFromEnv(process.env);
   if (!settings.ok) return refuse(settings.problems);
   for (const warning of settings.value.warnings) log(`motionmockups: ${warning}`);
+  const data = dataFolder(process.env);
+  if (!data.ok) return refuse(data.problems);
 
   adapter = await createServer({
     origin: origin.value,
     env: process.env,
     fetch: globalThis.fetch,
     renderOnce,
-    data: dataFolder(process.env),
+    data: data.value,
     chromeMode: settings.value.chromeMode,
     timeoutMs: settings.value.timeoutMs,
     version,
