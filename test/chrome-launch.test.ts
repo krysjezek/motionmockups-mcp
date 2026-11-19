@@ -36,9 +36,16 @@ test("flags: the pipe, the profile, the proxy rule and the mode", () => {
     "--proxy-server=http://127.0.0.1:9",
     "--proxy-bypass-list=<-loopback>;motionmockups.com;assets.motionmockups.com;*.r2.cloudflarestorage.com",
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+    "--password-store=basic",
+    "--use-mock-keychain",
     "--headless",
   ])
     assert.ok(headless.includes(flag), flag);
+  // No system keyring or keychain dialog in either mode.
+  for (const mode of ["headless", "window"] as const) {
+    const args = chromeArgs({ executable: "chrome", profile, origin: PUBLIC, mode });
+    assert.ok(args.includes("--password-store=basic") && args.includes("--use-mock-keychain"), mode);
+  }
   assert.equal(headless.at(-1), "about:blank");
   assert.ok(!headless.some((f) => f.startsWith("--window-")));
   assert.ok(!headless.some((f) => /^--remote-debugging-port/.test(f)), "never a TCP debugging port");

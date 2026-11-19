@@ -53,10 +53,13 @@ It needs Node.js 20 or later and Google Chrome (Chromium on Linux).
 - **Allowed folders** are the project folders your MCP client shares (its
   roots) and the folders in `MOTIONMOCKUPS_FOLDERS`. The agent cannot add a
   folder by naming it. A whole drive (`C:\`, `/`) is never an allowed folder.
+  When the client says it shares its folders but they cannot be read, the
+  render is refused (code `roots`) rather than saved in
+  `MOTIONMOCKUPS_FOLDERS` alone; the next render asks the client again.
 - **Recordings** are read only from inside an allowed folder, after every
   symlink and Windows junction is followed to where it really leads. Only
   regular files are read, and only when their first bytes show an MP4 or MOV,
-  WebM, PNG, JPEG, WebP or AVIF file under a matching name. Anything else is
+  WebM or MKV, PNG, JPEG, WebP or AVIF file under a matching name. Anything else is
   refused, and its contents are never read beyond those first bytes. A path
   that is not written inside an allowed folder is refused before the adapter
   looks it up, so a network path (`\\server\share`, `file://server/`) never
@@ -88,6 +91,11 @@ It needs Node.js 20 or later and Google Chrome (Chromium on Linux).
 - When the adapter is killed outright, Chrome loses its control pipe and
   closes too. Measured on Windows: no Chrome of the adapter's was left 0.6 s
   after `taskkill /F`, and 1.2 s after the client closed it mid-render.
+  A file it was saving stays in the data folder's `staging` until the next
+  render starts, which removes every download Chrome left there.
+- Chrome is told to refuse downloads from the moment it starts, and to save
+  only into `staging` while a result is being saved, so nothing lands in
+  your Downloads folder.
 
 ## Chrome mode
 
@@ -101,17 +109,17 @@ two-clip iPhone film, 75 frames at 720 × 404):
 | | headless | window |
 |---|---|---|
 | Frames | 75 | 75 |
-| Bitrate | 2,564 kb/s, both runs | 2,539 and 2,532 kb/s |
-| File size | 801,128 bytes, both runs | 793,322 and 791,345 bytes |
-| SSIM against the page's own render, either side of the cut | 0.9939 / 0.9962 | 0.9939 / 0.9962 |
-| SSIM over all frames, lowest / mean | 0.9932 / 0.9946 | 0.9931 / 0.9946 |
-| Render time: the whole `render` call, from request to answer (Chrome start, page load, render and save) | 2.3 s, 2.3 s | 2.4 s, 2.4 s |
+| Bitrate | 2,554 and 2,553 kb/s | 2,553 and 2,564 kb/s |
+| File size | 798,032 and 797,874 bytes | 797,874 and 801,128 bytes |
+| SSIM against the page's own render, either side of the cut | 0.9940 / 0.9962 | 0.9939 / 0.9962 |
+| SSIM over all frames, lowest / mean | 0.9932 / 0.9946 | 0.9932 / 0.9946 |
+| Render time: the whole `render` call, from request to answer (Chrome start, page load, render and save) | 3.0 s, 2.2 s | 2.2 s, 2.4 s |
 | Window in front kept focus | yes | yes |
 
 Both modes give the same frames at the same quality in the same time, so
-headless stays the default. Headless wrote 801,128 bytes in every run so
-far; window mode did too in the earlier runs, and 791–793 kB in this one,
-with the same SSIM. The page's own render is the site's verification script driving
+headless stays the default. The encoded size varies a little from run to
+run in both modes (791–801 kB so far; both modes wrote 797,874 bytes in
+this run), with the same SSIM. The page's own render is the site's verification script driving
 the same page in Playwright. For the focus check the foreground window was
 logged every 30 ms from before Chrome started until a second after it
 closed; it never changed. The window in front was another app in use at the
@@ -125,6 +133,17 @@ which may let a window-mode Chrome take focus.
 Free renders carry a watermark, and every free result says:
 
 > Watermarked preview for evaluation only. Publishing it needs Motion Mockups Pro (https://motionmockups.com/pricing).
+
+## Known limits
+
+- **A network that needs an HTTP proxy cannot render.** The adapter's Chrome
+  sends every request outside the site to a proxy that is not there, and
+  connects to the site and its media directly, so it does not use your
+  system or corporate proxy.
+- **Managed Chrome.** Enterprise policies can override what the adapter
+  sets: `ProxySettings` (the proxy rule above), `HeadlessMode` (headless
+  Chrome turned off) and `DownloadRestrictions` (results are saved through
+  Chrome's downloads) can each stop a render or break the setup.
 
 ## Development
 
@@ -147,9 +166,11 @@ node scripts/e2e.mjs
 ```
 
 It checks the film, stills, scenes delivery, refusals of paths outside the
-project, two adapters at once, cancel, a killed adapter, Chrome problems and
-equality with the page's own render, then measures both Chrome modes. It
-writes `e2e-results.json`. It needs ffmpeg and ffprobe, and uses temporary
+project, two adapters at once, cancel, a killed adapter (also while saving,
+and what it leaves in staging), Chrome problems and equality with the page's
+own render, then measures both Chrome modes. It writes `e2e-results.json`,
+with local folders replaced by `<temp>`, `<reference>`, `<repo>`, `<tmp>` and
+`~`. It needs ffmpeg and ffprobe, and uses temporary
 folders only. The site's own repository says how to build and serve the
 preview (port 4173, with `AGENT_PAGE=1`) and how to make the reference film.
 

@@ -57,6 +57,10 @@ export function chromeArgs(options: ChromeOptions): string[] {
     // WebRTC sends UDP around the HTTP proxy (STUN reaches any host). This policy gathers no
     // UDP candidate at all; the `--force-webrtc-ip-handling-policy` spelling does not, on Chrome 156.
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
+    // A fresh profile asks the system keyring (Linux) or keychain (macOS) to store its secrets,
+    // which can show the person a dialog mid-render. These keep them in the profile instead.
+    "--password-store=basic",
+    "--use-mock-keychain",
     ...(options.mode === "headless" ? ["--headless"] : ["--window-position=-32000,-32000", "--window-size=1280,800"]),
     "about:blank",
   ];

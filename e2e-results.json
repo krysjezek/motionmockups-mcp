@@ -1,5 +1,5 @@
 {
-  "when": "2026-11-19T18:26:23.245Z",
+  "when": "2026-11-19T18:50:04.362Z",
   "origin": "http://127.0.0.1:4173",
   "platform": "win32 10.0.26200",
   "node": "v24.14.0",
@@ -10,14 +10,14 @@
   },
   "freeFilm": {
     "file": "free-film.mp4",
-    "ms": 3032,
+    "ms": 3181,
     "width": 720,
     "height": 404,
     "frames": 75,
     "profile": "High",
     "level": 30,
     "duration": 2.5,
-    "bitRate": 2539964,
+    "bitRate": 2563609,
     "phases": [
       "starting",
       "checking",
@@ -30,22 +30,22 @@
   "twoAdapters": {
     "holds": [
       {
-        "pid": 41584,
-        "first": 33,
-        "last": 2201
+        "pid": 32268,
+        "first": 35,
+        "last": 2236
       },
       {
-        "pid": 57644,
-        "first": 2554,
-        "last": 4837
+        "pid": 24824,
+        "first": 2573,
+        "last": 5038
       }
     ],
     "waited": {
       "a": false,
       "b": true
     },
-    "aMs": 2201,
-    "bMs": 4851
+    "aMs": 2241,
+    "bMs": 5054
   },
   "killed": {
     "runs": [
@@ -53,22 +53,42 @@
         "how": "taskkill /F",
         "chromeWhileRendering": 9,
         "gone": true,
-        "ms": 592,
+        "ms": 591,
         "left": 0
       },
       {
         "how": "client close",
         "chromeWhileRendering": 9,
         "gone": true,
-        "ms": 1173,
+        "ms": 1178,
         "left": 0
+      },
+      {
+        "how": "taskkill /F while saving",
+        "chromeWhileRendering": null,
+        "gone": true,
+        "ms": 654,
+        "left": 0,
+        "killed": true,
+        "call": "killed before it answered",
+        "stagedAfterKill": []
       }
     ],
-    "nextMs": 2207
+    "nextMs": 2178,
+    "staging": {
+      "before": [
+        "3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        "3F2504E0-4F89-41D3-9A0C-0305E82C3302.crdownload",
+        "not-a-download.txt"
+      ],
+      "afterNextRender": [
+        "not-a-download.txt"
+      ]
+    }
   },
   "equality": {
     "reference": {
-      "file": "<temp>",
+      "file": "<reference>/free-film.mp4",
       "width": 720,
       "height": 404,
       "frames": 75,
@@ -84,7 +104,7 @@
       "profile": "High",
       "level": 30,
       "duration": 2.5,
-      "bitRate": 2539964
+      "bitRate": 2563609
     },
     "timestamps": {
       "film": 75,
@@ -110,12 +130,12 @@
       "headless": {
         "runs": [
           {
-            "ms": 2272,
+            "ms": 2968,
             "frames": 75,
             "size": "720x404",
-            "bitRate": 2563609,
-            "bytes": 801128,
-            "sha256": "6898d0c990ac17171063dfac502e7099277f7133634850cb0eae5c43caa95fbc",
+            "bitRate": 2553702,
+            "bytes": 798032,
+            "sha256": "22137af9605c106ab1c081bb9481876628098d1a1864da8f9eaa417126bc52ea",
             "profile": "High",
             "level": 30,
             "warnings": [
@@ -124,7 +144,7 @@
             "ssimSides": [
               {
                 "frame": 29,
-                "ssim": 0.9939
+                "ssim": 0.994
               },
               {
                 "frame": 30,
@@ -135,12 +155,12 @@
             "ssimMean": 0.9946
           },
           {
-            "ms": 2269,
+            "ms": 2153,
             "frames": 75,
             "size": "720x404",
-            "bitRate": 2563609,
-            "bytes": 801128,
-            "sha256": "63042359d1ae14928a88206b14f165d68b821c32bcccb278e611766595071d4c",
+            "bitRate": 2553196,
+            "bytes": 797874,
+            "sha256": "85463843473aa1be1e8dd751bfc394132a62e74e0cabf926c22655d04e96b960",
             "profile": "High",
             "level": 30,
             "warnings": [
@@ -163,18 +183,18 @@
         "chrome": {
           "processes": 9,
           "pids": [
-            52576,
-            48884,
-            52408,
-            53072,
-            53728,
-            57144,
-            46272,
-            40648,
-            45812
+            34284,
+            53216,
+            58912,
+            55568,
+            53868,
+            59140,
+            43176,
+            23804,
+            45416
           ],
           "browser": [
-            52576
+            34284
           ],
           "headlessFlag": true
         },
@@ -201,12 +221,12 @@
       "window": {
         "runs": [
           {
-            "ms": 2352,
+            "ms": 2211,
             "frames": 75,
             "size": "720x404",
-            "bitRate": 2538630,
-            "bytes": 793322,
-            "sha256": "97f1063b9e30208b6072a58856f6c587dbf68fcbf877ab543bfba37963b5c85a",
+            "bitRate": 2553196,
+            "bytes": 797874,
+            "sha256": "7f87706cf77a931379bdfe103c9c0ce67440eb5ee72d6b6118a577cf97a60fd5",
             "profile": "High",
             "level": 30,
             "warnings": [
@@ -222,16 +242,16 @@
                 "ssim": 0.9962
               }
             ],
-            "ssimMin": 0.9931,
+            "ssimMin": 0.9932,
             "ssimMean": 0.9946
           },
           {
-            "ms": 2395,
+            "ms": 2361,
             "frames": 75,
             "size": "720x404",
-            "bitRate": 2532304,
-            "bytes": 791345,
-            "sha256": "16a621d17c930236d06b0367fbd6e7f45ad083dad97068187fb98c356b824fdc",
+            "bitRate": 2563609,
+            "bytes": 801128,
+            "sha256": "ecb48c6dc7932a36a58f20c42382f012b4b084e26979e9b58bb7023ea64632dd",
             "profile": "High",
             "level": 30,
             "warnings": [
@@ -247,25 +267,25 @@
                 "ssim": 0.9962
               }
             ],
-            "ssimMin": 0.9931,
+            "ssimMin": 0.9932,
             "ssimMean": 0.9946
           }
         ],
         "chrome": {
           "processes": 9,
           "pids": [
-            52264,
-            38432,
-            44964,
-            36860,
-            37856,
-            57784,
-            9764,
-            2456,
-            47680
+            58584,
+            56216,
+            44016,
+            58540,
+            58872,
+            57520,
+            40612,
+            53928,
+            53516
           ],
           "browser": [
-            52264
+            58584
           ],
           "headlessFlag": false
         },
@@ -299,7 +319,7 @@
     {
       "name": "free film and stills",
       "result": "pass",
-      "detail": "list_scenes 25 iPhone scenes (both plan scenes listed); free-film.mp4 75 frames (expected 75) at 720x404 in 3032 ms; notice verbatim; warnings 1; stills: still-png-00m01s06f.png 720x404 magic ok, still-jpeg-00m01s06f.jpg 720x404 magic ok"
+      "detail": "list_scenes 25 iPhone scenes (both plan scenes listed); free-film.mp4 75 frames (expected 75) at 720x404 in 3181 ms; notice verbatim; warnings 1; stills: still-png-00m01s06f.png 720x404 magic ok, still-jpeg-00m01s06f.jpg 720x404 magic ok"
     },
     {
       "name": "scenes delivery",
@@ -314,27 +334,27 @@
     {
       "name": "two adapters at once",
       "result": "pass",
-      "detail": "both rendered 75 frames: true; lock holds (ms from start) pid 41584 33–2201, pid 57644 2554–4837; no overlap; waiting reported by B"
+      "detail": "both rendered 75 frames: true; lock holds (ms from start) pid 32268 35–2236, pid 24824 2573–5038; no overlap; waiting reported by B"
     },
     {
       "name": "cancel, then render",
       "result": "pass",
-      "detail": "cancelled while rendering, call rejected (MCP error -32001: e2e cancel); this run's Chrome gone after 450 ms; lock released; leftovers in motion-mockups/ 0, in staging 0; next render 75 frames"
+      "detail": "cancelled while rendering, call rejected (MCP error -32001: e2e cancel); this run's Chrome gone after 435 ms; lock released; leftovers in motion-mockups/ 0, in staging 0; next render 75 frames"
     },
     {
       "name": "adapter killed mid-render",
       "result": "pass",
-      "detail": "taskkill /F: 9 Chrome processes while rendering, none left after 592 ms; client close: 9 Chrome processes while rendering, none left after 1173 ms; next render 75 frames in 2207 ms"
+      "detail": "taskkill /F: 9 Chrome processes while rendering, none left after 591 ms; client close: 9 Chrome processes while rendering, none left after 1178 ms; taskkill /F while saving: killed as saving began, killed before it answered, no Chrome left after 654 ms, 0 file(s) left in staging; next render 75 frames in 2178 ms; staging before it [3f2504e0-4f89-41d3-9a0c-0305e82c3301, 3F2504E0-4F89-41D3-9A0C-0305E82C3302.crdownload, not-a-download.txt], after it [not-a-download.txt] (only not-a-download.txt may stay)"
     },
     {
       "name": "Chrome problems",
       "result": "pass",
-      "detail": "MOTIONMOCKUPS_CHROME=<missing>: refused code chrome (\"MOTIONMOCKUPS_CHROME is \"<temp>\", but there is no file there.\"); MOTIONMOCKUPS_ORIGIN=https://example.com: exit 1, stdout empty, stderr \"motionmockups: MOTIONMOCKUPS_ORIGIN is \"https://example.com\", which is not the Motion Mockups site, a local preview of it or one of its Vercel previews.\" (siteOrigin's code \"origin\" refusal; the command line prints its message and fix)"
+      "detail": "MOTIONMOCKUPS_CHROME=<missing>: refused code chrome (\"MOTIONMOCKUPS_CHROME is \"<temp>\\no-chrome-here\\chrome.exe\", but there is no file there.\"); MOTIONMOCKUPS_ORIGIN=https://example.com: exit 1, stdout empty, stderr \"motionmockups: MOTIONMOCKUPS_ORIGIN is \"https://example.com\", which is not the Motion Mockups site, a local preview of it or one of its Vercel previews.\" (siteOrigin's code \"origin\" refusal; the command line prints its message and fix)"
     },
     {
       "name": "equality with the page",
       "result": "pass",
-      "detail": "75 frames vs the page's 75, 720x404 vs 720x404; frame times 75 vs 75, worst difference 0 s (≤ 0.016667 s allowed); SSIM either side of the cut f29 0.9939, f30 0.9962, all frames min 0.9932, mean 0.9946 (every frame needs ≥ 0.97)"
+      "detail": "75 frames vs the page's 75, 720x404 vs 720x404; frame times 75 vs 75 (frames 75 vs 75), worst difference 0 s (≤ 0.016667 s allowed); SSIM either side of the cut f29 0.9939, f30 0.9962, all frames min 0.9932, mean 0.9946 (every frame needs ≥ 0.97)"
     }
   ],
   "tally": {

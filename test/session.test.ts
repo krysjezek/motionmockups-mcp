@@ -2,6 +2,7 @@ import { after, before, describe, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -9,7 +10,7 @@ import { findChrome } from "../src/chrome/find.ts";
 import { launchChrome } from "../src/chrome/launch.ts";
 import { allowedFolders } from "../src/folders.ts";
 import { acquireRenderLock, LOCK_NAME } from "../src/lock.ts";
-import { FREE_NOTICE, pageProgress, renderOnce, stopSignal, type RenderRequest } from "../src/session.ts";
+import { FREE_NOTICE, pageProgress, renderOnce, stopSignal, sweepStaging, type RenderRequest } from "../src/session.ts";
 
 const NOTICE = "Watermarked preview for evaluation only. Publishing it needs Motion Mockups Pro (https://motionmockups.com/pricing).";
 const TEST_ORIGIN = process.env.MOTIONMOCKUPS_TEST_ORIGIN?.trim();
@@ -199,6 +200,51 @@ test("waiting for another render reports the wait, and cancelling the wait gives
   assert.ok(seen.length <= 2, `reported ${seen.length} times in ~1.2 s`);
   assert.equal(fs.existsSync(path.join(data, "chrome-profile")), false, "Chrome waited for the lock");
 });
+
+// ---- what a killed adapter left in staging ----
+
+const GUID_A = "0f8fad5b-d9cb-469f-a165-70867728950e";
+const GUID_B = "7C9E6679-7425-40DE-944B-E07FC1F90AE7";
+const KEPT = ["notes.txt", `${GUID_A}.txt`, `x${GUID_A}`, `${GUID_A}.crdownload.bak`, "0f8fad5b-d9cb-469f-a165.crdownload"];
+
+function plantStaging(data: string): string {
+  const staging = path.join(data, "staging");
+  fs.mkdirSync(staging, { recursive: true });
+  for (const name of [GUID_A, `${GUID_B}.crdownload`, ...KEPT]) fs.writeFileSync(path.join(staging, name), "x");
+  return staging;
+}
+
+test("staging sweep: only Chrome's GUID download names (whole or .crdownload) are removed", async (t) => {
+  const data = temp(t, "mm-session-data-");
+  const staging = plantStaging(data);
+  fs.mkdirSync(path.join(staging, "f47ac10b-58cc-4372-a567-0e02b2c3d479")); // a folder by that name is not Chrome's
+  const removed = await sweepStaging(staging);
+  assert.deepEqual(removed.sort(), [GUID_A, `${GUID_B}.crdownload`].sort());
+  assert.deepEqual(fs.readdirSync(staging).sort(), [...KEPT, "f47ac10b-58cc-4372-a567-0e02b2c3d479"].sort());
+  assert.deepEqual(await sweepStaging(path.join(data, "no-such-folder")), [], "a missing staging folder is nothing to sweep");
+});
+
+test(
+  "a render's start removes what a killed adapter left in staging, and keeps anything else",
+  { skip: found.ok ? false : "no Google Chrome on this machine" },
+  async (t: TestContext) => {
+    const project = temp(t, "mm-session-project-");
+    const data = temp(t, "mm-session-data-");
+    const staging = plantStaging(data);
+    // A loopback origin nothing listens on: the render stops at the page, after the lock and the sweep.
+    const closed = await new Promise<number>((resolve) => {
+      const server = net.createServer().listen(0, "127.0.0.1", () => {
+        const { port } = server.address() as net.AddressInfo;
+        server.close(() => resolve(port));
+      });
+    });
+    const result = await renderOnce({ plan: PLAN }, context({ allowed: [project], data, origin: new URL(`http://127.0.0.1:${closed}`) }));
+    assert.equal(result.ok, false);
+    if (!result.ok) assert.equal(result.problems[0]!.code, "site", JSON.stringify(result.problems));
+    assert.deepEqual(fs.readdirSync(staging).sort(), [...KEPT].sort());
+    assert.equal(fs.existsSync(path.join(data, LOCK_NAME)), false, "the lock was released");
+  },
+);
 
 // ---- Chrome already on the shared profile (Chrome needed, no site) ----
 

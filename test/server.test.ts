@@ -10,7 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ListRootsRequestSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 
-import { FALLBACK_BRIEFING, checkCatalog, type AgentCatalog } from "../src/catalog.ts";
+import { FALLBACK_BRIEFING, MAX_BRIEFING_CHARS, checkCatalog, type AgentCatalog } from "../src/catalog.ts";
 import { createServer, sdkProblem, settingsFromEnv, type ServerDeps } from "../src/server.ts";
 import type { Rendered, RenderRequest, SessionContext } from "../src/session.ts";
 
@@ -78,6 +78,9 @@ async function start(
     renderOnce?: (request: RenderRequest, context: SessionContext) => Promise<Rendered>;
     env?: NodeJS.ProcessEnv;
     roots?: string[];
+    /** The client declares roots, but answering roots/list fails while this returns true. */
+    rootsFail?: () => boolean;
+    log?: (line: string) => void;
   } = {},
 ): Promise<Started> {
   const calls: Call[] = [];
@@ -94,7 +97,7 @@ async function start(
     chromeMode: "headless",
     timeoutMs: 20 * 60_000,
     version: "0.0.0-test",
-    log: () => {},
+    log: options.log ?? (() => {}),
   };
   const adapter = await createServer(deps);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -114,7 +117,10 @@ async function start(
   const client = new Client({ name: "test", version: "1" }, { capabilities: options.roots ? { roots: { listChanged: true } } : {} });
   if (options.roots) {
     const roots = options.roots;
-    client.setRequestHandler(ListRootsRequestSchema, () => ({ roots: roots.map((uri) => ({ uri })) }));
+    client.setRequestHandler(ListRootsRequestSchema, () => {
+      if (options.rootsFail?.()) throw new Error("the client could not list its roots");
+      return { roots: roots.map((uri) => ({ uri })) };
+    });
   }
   await adapter.server.connect(serverTransport);
   await client.connect(clientTransport);
@@ -137,6 +143,24 @@ const structured = (result: any) => result.structuredContent as any;
 test("the briefing is the server's instructions", async (t) => {
   const { client } = await start(t);
   assert.equal(client.getInstructions(), CATALOG.briefing);
+});
+
+test("a briefing longer than 8,000 characters is not passed on: the fallback is used, with a warning", async (t) => {
+  assert.equal(MAX_BRIEFING_CHARS, 8_000);
+  const logged: string[] = [];
+  const at = "x".repeat(MAX_BRIEFING_CHARS);
+  // Exactly at the cap it is used.
+  const { client: atCap } = await start(t, { fetch: catalogFetch(() => jsonResponse({ ...CATALOG, briefing: at })).fn, log: (l) => logged.push(l) });
+  assert.equal(atCap.getInstructions(), at);
+  assert.equal(logged.length, 0);
+  // One past it, the fallback, and one line on stderr saying why.
+  const { client } = await start(t, { fetch: catalogFetch(() => jsonResponse({ ...CATALOG, briefing: `${at}y` })).fn, log: (l) => logged.push(l) });
+  assert.equal(client.getInstructions(), FALLBACK_BRIEFING);
+  assert.equal(logged.length, 1);
+  assert.match(logged[0]!, /briefing is 8001 characters, more than the 8000/);
+  // The tools still work from that catalog.
+  const scenes = structured(await client.callTool({ name: "list_scenes", arguments: {} }));
+  assert.equal(scenes.scenes.length, 3);
 });
 
 test("the tools are the five documented ones", async (t) => {
@@ -251,6 +275,34 @@ test("roots are read again after roots/list_changed", async (t) => {
   await new Promise((resolve) => setTimeout(resolve, 50));
   await client.callTool({ name: "render", arguments: { plan: PLAN } });
   assert.deepEqual(calls[1]!.context.allowed, [second]);
+});
+
+test("roots that cannot be read refuse the render, never fall back to MOTIONMOCKUPS_FOLDERS alone", async (t) => {
+  const project = temp(t, "mm-proj-");
+  const extra = temp(t, "mm-extra-");
+  let failing = true;
+  const { client, calls } = await start(t, {
+    roots: [pathToFileURL(project).href],
+    rootsFail: () => failing,
+    env: { MOTIONMOCKUPS_FOLDERS: extra },
+  });
+  const result = await client.callTool({ name: "render", arguments: { plan: PLAN } });
+  assert.equal(result.isError, true);
+  assert.equal(calls.length, 0, "nothing was rendered");
+  const [problem] = structured(result).problems;
+  assert.equal(problem.code, "roots");
+  assert.match(problem.message, /could not be read/);
+  assert.match(problem.fix, /Try the render again/);
+  assert.match(problem.fix, /MOTIONMOCKUPS_FOLDERS/);
+  // The still refuses the same way.
+  const still = await client.callTool({ name: "still", arguments: { plan: PLAN, seconds: 1, format: "png" } });
+  assert.equal(structured(still).problems[0].code, "roots");
+  assert.equal(calls.length, 0);
+  // Asked again on the next render: once the client answers, the project comes first.
+  failing = false;
+  const again = await client.callTool({ name: "render", arguments: { plan: PLAN } });
+  assert.notEqual(again.isError, true, JSON.stringify(structured(again)));
+  assert.deepEqual(calls[0]!.context.allowed, [project, extra]);
 });
 
 test("still passes seconds and format", async (t) => {

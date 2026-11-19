@@ -114,6 +114,8 @@ test("every accepted type is recognised by its bytes", async (t) => {
     ["a.mp4", MP4_HEADER, "video"],
     ["a.mov", MP4_HEADER, "video"],
     ["a.webm", WEBM, "video"],
+    ["a.mkv", WEBM, "video"], // Matroska shares WebM's EBML header
+    ["a.MKV", WEBM, "video"],
     ["a.png", PNG, "image"],
     ["a.JPG", JPEG, "image"],
     ["a.jpeg", JPEG, "image"],

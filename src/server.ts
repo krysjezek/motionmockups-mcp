@@ -16,7 +16,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
-import { catalogSource, CATALOG_TIMEOUT_MS, FALLBACK_BRIEFING, type AgentCatalog } from "./catalog.ts";
+import { catalogSource, CATALOG_TIMEOUT_MS, serverInstructions, type AgentCatalog } from "./catalog.ts";
 import { allowedFolders, type Checked, type Problem } from "./folders.ts";
 import type { Progress, Rendered, RenderRequest, SessionContext } from "./session.ts";
 
@@ -131,7 +131,7 @@ const recording = z
   .string()
   .min(1)
   .describe(
-    "Path of the screen recording (MP4, MOV, WebM) or screenshot (PNG, JPEG, WebP, AVIF), inside the project folder. Without one, the screen shows a placeholder.",
+    "Path of the screen recording (MP4, MOV, WebM, MKV) or screenshot (PNG, JPEG, WebP, AVIF), inside the project folder. Without one, the screen shows a placeholder.",
   );
 const name = z.string().min(1).describe("File name for the result, without extension.");
 
@@ -185,6 +185,15 @@ export function sdkProblem(message: string): Problem {
   return unexpected(message);
 }
 
+/** The client says it shares its project folders (roots), but asking for them failed. */
+const rootsProblem = (detail: string): Problem => ({
+  code: "roots",
+  message: `The MCP client says it shares its project folders, but they could not be read (${detail}). Nothing was rendered: the files would have no project folder to go in.`,
+  fix:
+    "Try the render again; the adapter asks the client for its folders again. If it keeps failing, ask the person to restart their MCP client, " +
+    "or to set MOTIONMOCKUPS_FOLDERS in this MCP server's settings to the project folder.",
+});
+
 const ACCOUNT_NOTE =
   "Not signed in. Renders are free watermarked previews, for evaluation only. Signing in for clean output with Motion Mockups Pro is coming to this adapter.";
 
@@ -205,9 +214,7 @@ export interface AdapterServer {
 /** The server with its instructions from the catalog (fetched first, within 5 s). */
 export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   const catalog = catalogSource(deps.origin, deps.fetch, CATALOG_TIMEOUT_MS);
-  const first = await catalog.get();
-  if (!first.ok) deps.log(`motionmockups: ${first.problems[0]!.message} Starting with the built-in briefing.`);
-  const instructions = first.ok ? first.value.briefing : FALLBACK_BRIEFING;
+  const instructions = serverInstructions(await catalog.get(), deps.log);
 
   const server = new McpServer({ name: "motionmockups", version: deps.version }, { instructions, capabilities: { tools: {} } });
   // The SDK answers an input its schema refuses, an unknown tool or a handler's throw with a
@@ -218,17 +225,19 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
     refused([sdkProblem(message)]);
 
   // ---- Allowed folders: the client's roots, read again when they change, plus the setting ----
-  let roots: Promise<string[]> | undefined;
+  let roots: Promise<Checked<string[]>> | undefined;
   const clientHasRoots = () => !!server.server.getClientCapabilities()?.roots;
   const readRoots = () => {
-    const reading: Promise<string[]> = server.server
+    const reading: Promise<Checked<string[]>> = server.server
       .listRoots(undefined, { timeout: ROOTS_MS })
-      .then((r) => r.roots.map((root) => root.uri))
-      .catch((error) => {
-        deps.log(`motionmockups: the client's roots could not be read (${(error as Error)?.message ?? error}).`);
+      .then((r): Checked<string[]> => ({ ok: true, value: r.roots.map((root) => root.uri) }))
+      .catch((error): Checked<string[]> => {
+        const detail = String((error as Error)?.message ?? error);
+        deps.log(`motionmockups: the client's roots could not be read (${detail}).`);
         // Asked again on the next render.
         if (roots === reading) roots = undefined;
-        return [];
+        // Never MOTIONMOCKUPS_FOLDERS alone in their place: the files would land outside the project.
+        return { ok: false, problems: [rootsProblem(detail)] };
       });
     roots = reading;
   };
@@ -238,13 +247,15 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   server.server.setNotificationHandler(RootsListChangedNotificationSchema, () => {
     if (clientHasRoots()) readRoots();
   });
-  const allowed = async () => {
+  const allowed = async (): Promise<Checked<string[]>> => {
     let declared: string[] = [];
     if (clientHasRoots()) {
       if (!roots) readRoots();
-      declared = await roots!;
+      const read = await roots!;
+      if (!read.ok) return read;
+      declared = read.value;
     }
-    return allowedFolders(declared, deps.env);
+    return { ok: true, value: await allowedFolders(declared, deps.env) };
   };
 
   // ---- Renders, each cancelled by its request or by stop() ----
@@ -268,9 +279,11 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
       };
       let result: Rendered;
       try {
+        const folders = await allowed();
+        if (!folders.ok) return refused(folders.problems);
         result = await deps.renderOnce(request, {
           origin: deps.origin,
-          allowed: await allowed(),
+          allowed: folders.value,
           data: deps.data,
           chromeMode: deps.chromeMode,
           signal: controller.signal,

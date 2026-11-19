@@ -38,6 +38,28 @@ export const FALLBACK_BRIEFING = [
   "Finished files land in the motion-mockups folder.",
 ].join("\n");
 
+/** The longest briefing used as the server's instructions (the real one is under 1,000). */
+export const MAX_BRIEFING_CHARS = 8_000;
+
+/**
+ * The server's instructions: the catalog's briefing, or the fallback when the catalog could not
+ * be read or its briefing is longer than MAX_BRIEFING_CHARS. Each fallback is logged.
+ */
+export function serverInstructions(first: Checked<AgentCatalog>, log: (line: string) => void): string {
+  if (!first.ok) {
+    log(`motionmockups: ${first.problems[0]!.message} Starting with the built-in briefing.`);
+    return FALLBACK_BRIEFING;
+  }
+  const { briefing } = first.value;
+  if (briefing.length > MAX_BRIEFING_CHARS) {
+    log(
+      `motionmockups: the site's briefing is ${briefing.length} characters, more than the ${MAX_BRIEFING_CHARS} the adapter passes on. Starting with the built-in briefing.`,
+    );
+    return FALLBACK_BRIEFING;
+  }
+  return briefing;
+}
+
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const isString = (v: unknown): v is string => typeof v === "string";
 const isNumber = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);

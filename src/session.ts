@@ -3,8 +3,9 @@
 // each is saved by Chrome into `<data>/staging` and streamed from there into
 // `motion-mockups/`, never over an existing file.
 //
-// Steps, in order: check the recording and the output folder; take the render lock;
-// launch Chrome on `<data>/chrome-profile`; bridge the page's progress; open the page and
+// Steps, in order: check the recording and the output folder; take the render lock; sweep
+// what a killed adapter left in staging; launch Chrome on `<data>/chrome-profile`, refusing
+// downloads until a file is saved; bridge the page's progress; open the page and
 // check its contract; set the recording; render; save each file; release the page; and,
 // always, close Chrome, remove this session's staged files and release the lock.
 //
@@ -13,7 +14,7 @@
 
 import { once } from "node:events";
 import { createReadStream } from "node:fs";
-import { mkdir, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -249,6 +250,33 @@ async function identity(file: string): Promise<string> {
 /** Chrome's download ids are UUIDs; anything else is never joined to a path. */
 const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+const STAGED = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(\.crdownload)?$/i;
+
+/**
+ * Removes what an adapter killed while saving left in `staging`: Chrome's download files,
+ * named by their GUID (whole or still `.crdownload`). Called with the render lock held, so
+ * no other render is using them. Anything not named that way is left alone. Never throws.
+ */
+export async function sweepStaging(staging: string): Promise<string[]> {
+  let names: string[];
+  try {
+    names = await readdir(staging);
+  } catch {
+    return [];
+  }
+  const removed: string[] = [];
+  for (const name of names) {
+    if (!STAGED.test(name)) continue;
+    try {
+      await rm(path.join(staging, name), { force: true, maxRetries: 5, retryDelay: 200 });
+      removed.push(name);
+    } catch {
+      // Still held open somewhere; the next render tries again.
+    }
+  }
+  return removed;
+}
+
 /** A file name the page handed back, as stem and extension; null when it is not one the page makes. */
 export function deliveredName(name: unknown): { stem: string; ext: string } | null {
   if (typeof name !== "string") return null;
@@ -402,6 +430,8 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
   try {
     // What a render killed mid-copy left here a day or more ago (only the adapter's own partial names).
     await removeStalePartials(output.value);
+    // What an adapter killed while saving left in staging (the lock says no render is using it).
+    await sweepStaging(staging);
 
     // 3. Chrome on the adapter's own profile.
     report({ phase: "starting", completed: 0, total: 1, message: "Opening Chrome." }, true);
@@ -425,6 +455,8 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
       throw closed;
     });
     gone.catch(() => {});
+    // No download goes anywhere until a file is saved (a window-mode Chrome would otherwise use ~/Downloads).
+    await send("Browser.setDownloadBehavior", { behavior: "deny" }, SEND_MS, false);
     ({ sessionId } = await until(openPage(cdp), signal, SEND_MS * 2, limited("Target.createTarget", SEND_MS * 2), [gone]));
 
     // 4. The progress bridge, before the page loads.
@@ -618,6 +650,7 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
       delivered.push({ path: saved, bytes: size });
     }
     report({ phase: "saving", completed: result.files.length, total: result.files.length }, true);
+    await send("Browser.setDownloadBehavior", { behavior: "deny" }, SEND_MS, false).catch(() => {});
 
     // 9. The page lets go of its links, its staged files and the recording.
     pageReady = false;

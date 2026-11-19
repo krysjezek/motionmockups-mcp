@@ -330,6 +330,32 @@ while ($sw.Elapsed.TotalSeconds -lt 300) {
   };
 }
 
+// ---- the results file: no local paths in it ----
+
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Local folders, longest first, and what stands for each in e2e-results.json. */
+const REDACTIONS = [
+  [root, "<temp>"],
+  ...(REFERENCE ? [[path.dirname(path.resolve(REFERENCE)), "<reference>"]] : []),
+  [repo, "<repo>"],
+  [os.tmpdir(), "<tmp>"],
+  [os.homedir(), "~"],
+]
+  .filter(([folder]) => folder && folder.length > 3)
+  .sort((a, b) => b[0].length - a[0].length)
+  .map(([folder, label]) => {
+    // Either slash, as a path, a URL or a JSON-escaped message writes it.
+    const pattern = folder.split(/[\\/]/).map(escapeRegExp).join("[\\\\/]+");
+    return [new RegExp(pattern, windows ? "gi" : "g"), label];
+  });
+/** `value` with every local folder in its strings replaced by its label. */
+function redact(value) {
+  if (typeof value === "string") return REDACTIONS.reduce((text, [pattern, label]) => text.replace(pattern, label), value);
+  if (Array.isArray(value)) return value.map(redact);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v)]));
+  return value;
+}
+
 // ---- the run ----
 
 const results = { when: new Date().toISOString(), origin: ORIGIN, platform: `${process.platform} ${os.release()}`, node: process.version };
@@ -521,20 +547,41 @@ try {
   // ------------------------------------------------------- adapter killed mid-render
   await attempt("adapter killed mid-render", async () => {
     const runs = [];
-    for (const how of ["taskkill /F", "client close"]) {
-      if (!windows && how === "taskkill /F") continue;
+    const staging = path.join(data, "staging");
+    const stagedNames = () => (fs.existsSync(staging) ? fs.readdirSync(staging) : []);
+    const taskkill = (pid) =>
+      execFileSync(path.join(process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "taskkill.exe"), ["/F", "/PID", String(pid)], { windowsHide: true, stdio: "ignore" });
+    // The last one is killed the moment it reports saving, before anything else runs (counting
+    // Chrome takes PowerShell most of a second, longer than a save). Whether it lands before the
+    // save ends is a race, so it is recorded, not required: the planted files below are the check.
+    for (const how of ["taskkill /F", "client close", "taskkill /F while saving"]) {
+      if (!windows && how.startsWith("taskkill /F")) continue;
+      const saving = how.endsWith("while saving");
       const k = await startAdapter();
       let hit;
+      let killedAt = 0;
       const killed = new Promise((resolve) => (hit = resolve));
-      const rendering = call(k, "render", { plan: longFilm(), recording: "recording.mp4", name: `killed-${how.split(" ")[0]}` }, {
-        onPhase: (phase) => phase === "rendering" && hit(),
-      }).catch(() => {});
+      const rendering = call(k, "render", { plan: longFilm(), recording: "recording.mp4", name: `killed-${saving ? "saving" : how.split(" ")[0]}` }, {
+        onPhase: (phase) => {
+          if (phase !== (saving ? "saving" : "rendering")) return;
+          if (saving && !killedAt) {
+            killedAt = performance.now();
+            taskkill(k.pid);
+          }
+          hit();
+        },
+      }).then(
+        () => "answered before the kill",
+        () => "killed before it answered",
+      );
       await Promise.race([killed, delay(60_000)]);
-      const whileRendering = ours([k.pid]).length;
-      const at = performance.now();
+      const whileRendering = saving ? null : ours([k.pid]).length;
+      const at = killedAt || performance.now();
       let closing = Promise.resolve();
-      if (how === "taskkill /F") {
-        execFileSync(path.join(process.env.SYSTEMROOT ?? "C:\\Windows", "System32", "taskkill.exe"), ["/F", "/PID", String(k.pid)], { windowsHide: true, stdio: "ignore" });
+      if (saving) {
+        // Killed above.
+      } else if (how === "taskkill /F") {
+        taskkill(k.pid);
       } else {
         // The SDK ends stdin, then sends SIGTERM 2 s later if the server is still there.
         closing = k.close();
@@ -542,21 +589,48 @@ try {
       const gone = await chromeGone(10_000, [k.pid]);
       await closing;
       const sinceKill = Math.round(performance.now() - at);
-      await rendering;
+      const outcome = await rendering;
       await k.close();
-      runs.push({ how, chromeWhileRendering: whileRendering, gone: gone.gone, ms: gone.gone ? sinceKill : null, left: gone.left });
+      runs.push({
+        how,
+        chromeWhileRendering: whileRendering,
+        gone: gone.gone,
+        ms: gone.gone ? sinceKill : null,
+        left: gone.left,
+        ...(saving ? { killed: !!killedAt, call: outcome, stagedAfterKill: stagedNames() } : {}),
+      });
       if (!gone.gone) killOurChrome();
     }
+    // What a kill while saving leaves, whether or not this run's kill landed in time: Chrome's
+    // download names (whole and .crdownload), and a file that is not one of them, which stays.
+    const planted = ["3f2504e0-4f89-41d3-9a0c-0305e82c3301", "3F2504E0-4F89-41D3-9A0C-0305E82C3302.crdownload"];
+    const keep = "not-a-download.txt";
+    fs.mkdirSync(staging, { recursive: true });
+    for (const name of [...planted, keep]) fs.writeFileSync(path.join(staging, name), "left by a killed adapter");
+    const before = stagedNames();
     // The killed adapter's lock names a pid that is gone: the next render takes it over at once.
     const next = await call(main, "render", { plan: twoClips(), recording: "recording.mp4", name: "after-kill" });
     const nextFrames = next.result.isError ? 0 : probe(next.value.files[0].path).frames;
-    results.killed = { runs, nextMs: next.ms };
+    const afterNext = stagedNames();
+    fs.rmSync(path.join(staging, keep), { force: true });
+    const swept = afterNext.length === 1 && afterNext[0] === keep;
+    results.killed = { runs, nextMs: next.ms, staging: { before, afterNextRender: afterNext } };
     pass(
       "adapter killed mid-render",
-      runs.length > 0 && runs.every((r) => r.chromeWhileRendering > 0 && r.gone) && nextFrames === frames,
+      runs.length > 0 &&
+        runs.every((r) => (r.chromeWhileRendering === null ? r.killed : r.chromeWhileRendering > 0) && r.gone) &&
+        nextFrames === frames &&
+        swept,
       runs
-        .map((r) => `${r.how}: ${r.chromeWhileRendering} Chrome processes while rendering, ${r.gone ? `none left after ${r.ms} ms` : `${r.left} still running after 10 s`}`)
-        .join("; ") + `; next render ${next.result.isError ? `refused ${codes(next.value)}` : `${nextFrames} frames in ${next.ms} ms`}`,
+        .map((r) =>
+          r.chromeWhileRendering === null
+            ? `${r.how}: ${r.killed ? `killed as saving began, ${r.call}` : "never reached saving"}, ` +
+              `${r.gone ? `no Chrome left after ${r.ms} ms` : `${r.left} Chrome still running after 10 s`}, ${r.stagedAfterKill.length} file(s) left in staging`
+            : `${r.how}: ${r.chromeWhileRendering} Chrome processes while rendering, ${r.gone ? `none left after ${r.ms} ms` : `${r.left} still running after 10 s`}`,
+        )
+        .join("; ") +
+        `; next render ${next.result.isError ? `refused ${codes(next.value)}` : `${nextFrames} frames in ${next.ms} ms`}` +
+        `; staging before it [${before.join(", ")}], after it [${afterNext.join(", ")}] (only ${keep} may stay)`,
     );
   });
 
@@ -613,8 +687,10 @@ try {
       // Every frame's presentation time, equal within half a frame.
       const filmTimes = frameTimes(film);
       const pageTimes = frameTimes(REFERENCE);
-      const worst = filmTimes.length === pageTimes.length ? filmTimes.reduce((w, t, i) => Math.max(w, Math.abs(t - pageTimes[i])), 0) : Infinity;
-      const timesMatch = worst <= 0.5 / fps;
+      // One time per frame on each side: two empty lists (an ffprobe that read nothing) never pass.
+      const counted = filmTimes.length === p.frames && pageTimes.length === reference.frames && filmTimes.length > 0;
+      const worst = counted && filmTimes.length === pageTimes.length ? filmTimes.reduce((w, t, i) => Math.max(w, Math.abs(t - pageTimes[i])), 0) : Infinity;
+      const timesMatch = counted && worst <= 0.5 / fps;
       results.equality = {
         reference: { file: REFERENCE, ...reference },
         film: p,
@@ -632,7 +708,7 @@ try {
           c.sides.every((s) => s.ssim >= 0.97) &&
           c.min >= 0.97,
         `${p.frames} frames vs the page's ${reference.frames}, ${p.width}x${p.height} vs ${reference.width}x${reference.height}; ` +
-          `frame times ${filmTimes.length} vs ${pageTimes.length}, worst difference ${Number.isFinite(worst) ? `${round(worst, 6)} s` : "counts differ"} (≤ ${round(0.5 / fps, 6)} s allowed); ` +
+          `frame times ${filmTimes.length} vs ${pageTimes.length} (frames ${p.frames} vs ${reference.frames}), worst difference ${Number.isFinite(worst) ? `${round(worst, 6)} s` : "counts differ"} (≤ ${round(0.5 / fps, 6)} s allowed); ` +
           `SSIM either side of the cut ${c.sides.map((s) => `f${s.frame} ${s.ssim}`).join(", ")}, all frames min ${c.min}, mean ${c.mean} (every frame needs ≥ 0.97)`,
       );
     });
@@ -738,7 +814,7 @@ try {
     fail: checks.filter((c) => c.result === "fail").length,
     skip: checks.filter((c) => c.result === "skip").length,
   };
-  fs.writeFileSync(RESULTS, `${JSON.stringify(results, null, 2)}\n`);
+  fs.writeFileSync(RESULTS, `${JSON.stringify(redact(results), null, 2)}\n`);
   console.log(`\n${results.tally.pass} pass, ${results.tally.fail} fail, ${results.tally.skip} skipped; ${path.relative(process.cwd(), RESULTS)}`);
   if (KEEP) console.log(`kept ${root}`);
   else fs.rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });

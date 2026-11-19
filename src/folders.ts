@@ -113,7 +113,7 @@ function outsideFix(allowed: string[]): string {
   );
 }
 
-const ACCEPTED = "MP4, MOV, WebM, PNG, JPEG, WebP or AVIF";
+const ACCEPTED = "MP4, MOV, WebM, MKV, PNG, JPEG, WebP or AVIF";
 
 type Format = "mp4" | "webm" | "png" | "jpeg" | "webp" | "avif";
 const KIND: Record<Format, "video" | "image"> = {
@@ -129,6 +129,8 @@ const EXTENSIONS: Record<string, Format> = {
   ".m4v": "mp4",
   ".mov": "mp4",
   ".webm": "webm",
+  // Matroska: WebM is a subset of it, and both start with the same EBML header. The page takes either.
+  ".mkv": "webm",
   ".png": "png",
   ".jpg": "jpeg",
   ".jpeg": "jpeg",
