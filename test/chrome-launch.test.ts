@@ -1,0 +1,221 @@
+import { after, before, test } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import http from "node:http";
+import type { AddressInfo } from "node:net";
+import os from "node:os";
+import path from "node:path";
+
+import type { Cdp } from "../src/chrome/cdp.ts";
+import { findChrome } from "../src/chrome/find.ts";
+import { chromeArgs, launchChrome, openPage, type Chrome } from "../src/chrome/launch.ts";
+
+const windows = process.platform === "win32";
+const found = findChrome();
+const skip = found.ok ? false : "no Google Chrome on this machine";
+const executable = found.ok ? found.value : "";
+const PUBLIC = new URL("https://motionmockups.com");
+
+// ---- flags (no Chrome needed) ----
+
+test("flags: the pipe, the profile, the proxy rule and the mode", () => {
+  const profile = path.join(os.tmpdir(), "profile");
+  const headless = chromeArgs({ executable: "chrome", profile, origin: PUBLIC, mode: "headless" });
+  for (const flag of [
+    "--remote-debugging-pipe",
+    `--user-data-dir=${profile}`,
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-extensions",
+    "--disable-sync",
+    "--disable-background-networking",
+    "--disable-background-timer-throttling",
+    "--disable-backgrounding-occluded-windows",
+    "--disable-renderer-backgrounding",
+    "--proxy-server=http://127.0.0.1:9",
+    "--proxy-bypass-list=<-loopback>;motionmockups.com;assets.motionmockups.com;*.r2.cloudflarestorage.com",
+    "--headless",
+  ])
+    assert.ok(headless.includes(flag), flag);
+  assert.equal(headless.at(-1), "about:blank");
+  assert.ok(!headless.some((f) => f.startsWith("--window-")));
+  assert.ok(!headless.some((f) => /^--remote-debugging-port/.test(f)), "never a TCP debugging port");
+
+  const window = chromeArgs({ executable: "chrome", profile, origin: PUBLIC, mode: "window" });
+  assert.ok(!window.includes("--headless"));
+  assert.ok(window.includes("--window-position=-32000,-32000"));
+  assert.ok(window.includes("--window-size=1280,800"));
+
+  const loopback = chromeArgs({ executable: "chrome", profile, origin: new URL("http://127.0.0.1:5173"), mode: "headless" });
+  assert.ok(loopback.includes("--proxy-bypass-list=<-loopback>;127.0.0.1:5173;assets.motionmockups.com;*.r2.cloudflarestorage.com"));
+});
+
+// ---- the real Chrome ----
+
+let profile = "";
+let server: http.Server;
+let port = 0;
+let other: http.Server;
+let otherPort = 0;
+const running: Chrome[] = [];
+
+function listen(): Promise<[http.Server, number]> {
+  return new Promise((resolve) => {
+    const s = http.createServer((_req, res) => res.end("<p>local</p>"));
+    s.listen(0, "127.0.0.1", () => resolve([s, (s.address() as AddressInfo).port]));
+  });
+}
+
+before(async () => {
+  profile = fs.mkdtempSync(path.join(os.tmpdir(), "mm-chrome-test-"));
+  [server, port] = await listen();
+  [other, otherPort] = await listen();
+});
+
+after(async () => {
+  for (const chrome of running) await chrome.close();
+  server?.close();
+  other?.close();
+  // Chrome holds profile files open until it has exited; close() waited for that.
+  if (profile) fs.rmSync(profile, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
+});
+
+async function launch(origin = PUBLIC): Promise<Chrome> {
+  const chrome = await launchChrome({ executable, profile, origin, mode: "headless" });
+  running.push(chrome);
+  return chrome;
+}
+
+async function evaluate(cdp: Cdp, sessionId: string, expression: string): Promise<unknown> {
+  const result = await cdp.send<any>("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true }, sessionId);
+  if (result.exceptionDetails) throw new Error(result.exceptionDetails.text);
+  return result.result.value;
+}
+
+const reach = (url: string) =>
+  `fetch(${JSON.stringify(url)}, { mode: "no-cors", cache: "no-store" }).then(() => "reached", (e) => "blocked: " + e.message)`;
+
+async function navigate(cdp: Cdp, sessionId: string, url: string): Promise<string> {
+  const result = await cdp.send<any>("Page.navigate", { url }, sessionId);
+  return result.errorText || "reached";
+}
+
+/** pid -> parent pid, name, for every process. */
+function processes(): Map<number, { ppid: number; name: string }> {
+  const table = new Map<number, { ppid: number; name: string }>();
+  if (windows) {
+    const json = execFileSync(
+      "powershell.exe",
+      ["-NoProfile", "-NonInteractive", "-Command", "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress"],
+      { encoding: "utf8", windowsHide: true, maxBuffer: 64 * 1024 * 1024 },
+    );
+    for (const p of JSON.parse(json)) table.set(p.ProcessId, { ppid: p.ParentProcessId, name: p.Name });
+  } else {
+    for (const line of execFileSync("ps", ["-A", "-o", "pid=,ppid=,comm="], { encoding: "utf8" }).split("\n")) {
+      const m = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+      if (m) table.set(Number(m[1]), { ppid: Number(m[2]), name: m[3] });
+    }
+  }
+  return table;
+}
+
+function tree(root: number, table = processes()): Map<number, string> {
+  const found = new Map<number, string>();
+  const walk = (pid: number) => {
+    for (const [child, p] of table) if (p.ppid === pid && !found.has(child)) {
+      found.set(child, p.name);
+      walk(child);
+    }
+  };
+  walk(root);
+  return found;
+}
+
+test("a headless launch evaluates 1+1 to 2", { skip }, async () => {
+  const chrome = await launch();
+  const { sessionId } = await openPage(chrome.cdp);
+  assert.equal(await evaluate(chrome.cdp, sessionId, "1+1"), 2);
+  await chrome.close();
+});
+
+test("the proxy rule: allowed hosts through, others and loopback blocked", { skip }, async () => {
+  const chrome = await launch();
+  const { sessionId } = await openPage(chrome.cdp);
+  assert.equal(await evaluate(chrome.cdp, sessionId, reach("https://assets.motionmockups.com/robots.txt")), "reached");
+  assert.match(String(await evaluate(chrome.cdp, sessionId, reach("https://example.com/"))), /^blocked/);
+  // A public origin gets no loopback: Chrome would otherwise bypass the proxy for it implicitly.
+  assert.equal(await navigate(chrome.cdp, sessionId, `http://127.0.0.1:${port}/`), "net::ERR_PROXY_CONNECTION_FAILED");
+  assert.equal(await navigate(chrome.cdp, sessionId, "https://example.com/"), "net::ERR_PROXY_CONNECTION_FAILED");
+  assert.equal(await navigate(chrome.cdp, sessionId, "https://www.motionmockups.com/"), "net::ERR_PROXY_CONNECTION_FAILED");
+  await chrome.close();
+});
+
+test("a loopback origin is reached; other ports and hosts are not", { skip }, async () => {
+  const chrome = await launch(new URL(`http://127.0.0.1:${port}`));
+  const { sessionId } = await openPage(chrome.cdp);
+  assert.equal(await navigate(chrome.cdp, sessionId, `http://127.0.0.1:${port}/`), "reached");
+  assert.equal(await evaluate(chrome.cdp, sessionId, "document.body.textContent"), "local");
+  assert.equal(await evaluate(chrome.cdp, sessionId, reach("https://assets.motionmockups.com/robots.txt")), "reached");
+  assert.match(String(await evaluate(chrome.cdp, sessionId, reach("https://example.com/"))), /^blocked/);
+  assert.equal(await navigate(chrome.cdp, sessionId, `http://127.0.0.1:${otherPort}/`), "net::ERR_PROXY_CONNECTION_FAILED");
+  await chrome.close();
+});
+
+/** Waits up to 5 s for every watched Chrome process to be gone; returns those left. */
+async function leftOver(watched: Set<number>): Promise<number[]> {
+  let left: number[] = [];
+  for (let waited = 0; waited <= 5000; waited += 250) {
+    const table = processes();
+    left = [...watched].filter((p) => table.has(p) && /chrom/i.test(table.get(p)!.name));
+    if (left.length === 0) break;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  return left;
+}
+
+test("after close() Chrome has exited and no child of it remains", { skip }, async (t) => {
+  const chrome = await launch();
+  await openPage(chrome.cdp);
+  const children = tree(chrome.pid);
+  assert.ok(children.size > 0, "Chrome should have started child processes");
+  t.diagnostic(`browser ${chrome.pid}, children ${[...children].map(([p, n]) => `${p} ${n}`).join(", ")}`);
+  await chrome.close();
+  t.diagnostic(`exit code ${await chrome.exited}`);
+  const left = await leftOver(new Set([chrome.pid, ...children.keys()]));
+  assert.deepEqual(left, [], `still running: ${left.join(", ")}`);
+  // close() twice is harmless.
+  await chrome.close();
+});
+
+test("a Chrome that does not answer Browser.close is killed with its whole tree after 5 s", { skip }, async (t) => {
+  const chrome = await launch();
+  await openPage(chrome.cdp);
+  const children = tree(chrome.pid);
+  assert.ok(children.size > 0, "Chrome should have started child processes");
+  // With the client closed, Browser.close never reaches Chrome: only the kill can end it.
+  chrome.cdp.close();
+  const started = Date.now();
+  await chrome.close();
+  const took = Date.now() - started;
+  t.diagnostic(`killed after ${took} ms, exit code ${await chrome.exited}, children ${children.size}`);
+  assert.ok(took >= 4900, `close() should have waited 5 s first, took ${took} ms`);
+  const left = await leftOver(new Set([chrome.pid, ...children.keys()]));
+  assert.deepEqual(left, [], `still running: ${left.join(", ")}`);
+});
+
+test("a second launch on the same profile works", { skip }, async () => {
+  const first = await launch();
+  await first.close();
+  const second = await launch();
+  const { sessionId } = await openPage(second.cdp);
+  assert.equal(await evaluate(second.cdp, sessionId, "6*7"), 42);
+  await second.close();
+});
+
+test("a wrong executable is refused with code chrome-start", async () => {
+  await assert.rejects(
+    launchChrome({ executable: path.join(os.tmpdir(), "no-such-chrome.exe"), profile: path.join(profile, "never"), origin: PUBLIC, mode: "headless" }),
+    (e: any) => e.code === "chrome-start" && typeof e.fix === "string" && /MOTIONMOCKUPS_CHROME/.test(e.fix),
+  );
+});
