@@ -667,15 +667,18 @@ describe("a render session on the agent page", { skip: TEST_ORIGIN ? false : "MO
 
   test("cancelled while saving file 2 of 2: the refusal names the file already saved, which stays", async () => {
     const caller = new AbortController();
-    const result = await renderOnce(
-      { ...film, name: "half", plan: { ...(film.plan as object), delivery: "scenes" } },
-      ctx({
-        signal: caller.signal,
-        onProgress: (p) => {
-          if (p.phase === "saving" && p.completed === 1) caller.abort();
-        },
-      }),
-    );
+    // Progress is throttled (one report per 250 ms), so "saving 1/2" may never be reported:
+    // the cancel comes when the first file appears under its own name.
+    const out = path.join(project, "motion-mockups");
+    const watch = setInterval(() => {
+      if (fs.existsSync(out) && fs.readdirSync(out).some((f) => /^half.*\.mp4$/.test(f))) caller.abort();
+    }, 2);
+    let result;
+    try {
+      result = await renderOnce({ ...film, name: "half", plan: { ...(film.plan as object), delivery: "scenes" } }, ctx({ signal: caller.signal }));
+    } finally {
+      clearInterval(watch);
+    }
     assert.equal(result.ok, false);
     if (result.ok) return;
     assert.equal(result.problems[0]!.code, "cancelled", JSON.stringify(result.problems));
@@ -820,25 +823,28 @@ describe("a render session on the agent page", { skip: TEST_ORIGIN ? false : "MO
       name: "slow",
       plan: { contract: 1, device: "iPhone", aspect: "9:16", clips: [{ scene: CLIPS[0]!.scene, seconds: 8 }, { scene: CLIPS[1]!.scene, seconds: 8 }] },
     };
+    // The first and the last rendering report (progress is throttled, so a short phase after
+    // rendering may never be reported): the timeout lands between them.
     let renderingAt = 0;
-    let finalizingAt = 0;
+    let renderedAt = 0;
     const started = performance.now();
     const timed = await renderOnce(
       { ...long, name: "timed" },
       ctx({
         onProgress: (p) => {
-          if (p.phase === "rendering") renderingAt ||= performance.now() - started;
-          if (p.phase === "finalizing") finalizingAt ||= performance.now() - started;
+          if (p.phase !== "rendering") return;
+          renderingAt ||= performance.now() - started;
+          renderedAt = performance.now() - started;
         },
       }),
     );
-    assert.ok(timed.ok && renderingAt > 0 && finalizingAt > renderingAt, JSON.stringify({ timed, renderingAt, finalizingAt }));
-    const timeoutMs = Math.round((renderingAt + finalizingAt) / 2);
+    assert.ok(timed.ok && renderingAt > 0 && renderedAt > renderingAt + 500, JSON.stringify({ timed, renderingAt, renderedAt }));
+    const timeoutMs = Math.round((renderingAt + renderedAt) / 2);
     let last: Progress | undefined;
     const result = await renderOnce(long, ctx({ timeoutMs, onProgress: (p) => (last = p) }));
     assert.equal(result.ok, false);
     if (!result.ok) assert.equal(result.problems[0]!.code, "timeout", JSON.stringify(result.problems));
-    t.diagnostic(`timeout ${timeoutMs} ms (rendering ${Math.round(renderingAt)}–${Math.round(finalizingAt)} ms), stopped at ${JSON.stringify(last)}`);
+    t.diagnostic(`timeout ${timeoutMs} ms (rendering ${Math.round(renderingAt)}–${Math.round(renderedAt)} ms), stopped at ${JSON.stringify(last)}`);
     assert.equal(last?.phase, "rendering", `stopped at ${timeoutMs} ms while ${JSON.stringify(last)}`);
     assert.deepEqual(staged(), []);
     assert.ok(await chromeGone(path.join(data, "chrome-profile")));
