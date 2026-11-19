@@ -73,13 +73,32 @@ test("start: a link outside the configured origin, or a malformed answer, is ref
   }
 });
 
-test("start: a redirect is never followed", async (t) => {
-  const site = await agentSite(t, {
-    start: () => ({ status: 302, body: {}, headers: { location: "https://evil.example/api/agent/connect/start" } }),
-  });
-  const started = await startConnect(site.origin, globalThis.fetch);
+test("a 307 to another site is never followed: start, poll (the device code) and status (the bearer) reach only the configured origin", async (t) => {
+  const elsewhere = await agentSite(t, { polls: [approved()] });
+  const to = (route: string) => ({ status: 307, body: {}, headers: { location: `${elsewhere.origin.origin}${route}` } });
+
+  const startSite = await agentSite(t, { start: () => to("/api/agent/connect/start") });
+  const started = await startConnect(startSite.origin, globalThis.fetch);
   assert.equal(started.ok, false);
   if (!started.ok) assert.equal(started.problems[0]!.code, "site");
+
+  const data = temp(t, "mm-connect-");
+  const pollSite = await agentSite(t, { start: goodStart({ expires_in: 20 }), polls: [to("/api/agent/connect/poll")] });
+  const f = flows(t, pollSite.origin, data);
+  assert.ok((await f.begin()).ok);
+  const outcome = await f.wait(new AbortController().signal, () => {});
+  assert.equal(outcome.ok, false, "a redirected poll never approves");
+  assert.ok(pollSite.polls().length >= 2, "polled the configured origin");
+  assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
+
+  const statusSite = await agentSite(t, { status: () => to("/api/agent/status") });
+  await writeToken(data, statusSite.origin, TOKEN);
+  const account = await currentAccount(statusSite.origin, data, globalThis.fetch);
+  assert.equal(account.ok, false);
+  if (!account.ok) assert.equal(account.problems[0]!.code, "site");
+  assert.ok(fs.existsSync(path.join(data, TOKEN_FILE)), "a redirect is not a 401");
+
+  assert.deepEqual(elsewhere.seen, [], "the other site received nothing");
 });
 
 test("pending, then approved: the token is saved for the origin, and the outcome names the label", async (t) => {
@@ -180,27 +199,45 @@ test("no answer within the expiry is a timeout", async (t) => {
   if (!outcome.ok) assert.equal(outcome.problems[0]!.code, "timeout");
 });
 
-test("cancelling the wait ends the flow: polling stops and nothing is saved", async (t) => {
+test("cancelling the wait only stops waiting: polling goes on, a later approval is saved, and the next wait reports it", async (t) => {
   const data = temp(t, "mm-connect-");
-  const site = await agentSite(t, { polls: [pending] });
+  const site = await agentSite(t, { polls: [pending, pending, pending, pending, pending, pending, approved()] });
   const f = flows(t, site.origin, data);
   assert.ok((await f.begin()).ok);
   const controller = new AbortController();
-  const waiting = f.wait(controller.signal, () => {});
-  await new Promise((resolve) => setTimeout(resolve, 80));
+  const ticks: string[] = [];
+  const waiting = f.wait(controller.signal, (m) => ticks.push(m));
+  await new Promise((resolve) => setTimeout(resolve, 40));
   controller.abort();
   const outcome = await waiting;
   assert.equal(outcome.ok, false);
-  if (!outcome.ok) assert.equal(outcome.problems[0]!.code, "cancelled");
-  // A poll already on the wire when the cancel came may still land; none is sent after it.
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  const polls = site.polls().length;
-  await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.equal(site.polls().length, polls, "no poll after the cancel");
-  // Nothing waits any more.
+  if (!outcome.ok) {
+    assert.equal(outcome.problems[0]!.code, "cancelled");
+    assert.match(outcome.problems[0]!.fix, /wait: true/);
+  }
+  const reported = ticks.length;
+  // The sign-in goes on: it is polled until approved, and the token saved.
+  for (let i = 0; i < 100 && !fs.existsSync(path.join(data, TOKEN_FILE)); i++) await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(site.polls().length, 7);
+  assert.deepEqual(await readToken(data, site.origin), { ok: true, value: TOKEN });
+  assert.equal(ticks.length, reported, "the cancelled wait's listener was detached");
   const again = await f.wait(new AbortController().signal, () => {});
-  assert.equal(again.ok, false);
-  if (!again.ok) assert.match(again.problems[0]!.fix, /connect_account/);
+  assert.ok(again.ok, JSON.stringify(again));
+});
+
+test("a wait cancelled before it starts returns cancelled and leaves the sign-in pending", async (t) => {
+  const data = temp(t, "mm-connect-");
+  const site = await agentSite(t, { polls: [pending] });
+  const f = flows(t, site.origin, data);
+  const begun = await f.begin();
+  assert.ok(begun.ok);
+  const controller = new AbortController();
+  controller.abort();
+  const outcome = await f.wait(controller.signal, () => {});
+  assert.equal(outcome.ok, false);
+  if (!outcome.ok) assert.equal(outcome.problems[0]!.code, "cancelled");
+  const again = await f.begin();
+  assert.ok(again.ok && again.value.reused, "the same sign-in is still pending");
 });
 
 test("one flow at a time: begin while pending gives the same code; a second wait is refused as busy", async (t) => {
@@ -229,15 +266,39 @@ test("an approval with nobody waiting is still saved, and the next wait reports 
   assert.ok(outcome.ok);
 });
 
-test("end() stops a pending flow", async (t) => {
+test("end() stops a pending flow, including after a cancelled wait", async (t) => {
   const data = temp(t, "mm-connect-");
   const site = await agentSite(t, { polls: [pending] });
   const f = flows(t, site.origin, data);
   assert.ok((await f.begin()).ok);
+  const controller = new AbortController();
+  const waiting = f.wait(controller.signal, () => {});
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  controller.abort();
+  await waiting;
   await f.end();
+  await new Promise((resolve) => setTimeout(resolve, 50));
   const polls = site.polls().length;
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(site.polls().length, polls);
+  const after = await f.wait(new AbortController().signal, () => {});
+  assert.equal(after.ok, false);
+  if (!after.ok) assert.match(after.problems[0]!.message, /No sign-in is waiting/);
+});
+
+test("end() during an approving poll: once it returns, no token is ever written", async (t) => {
+  const data = temp(t, "mm-connect-");
+  // The approval is on its way when end() is called.
+  const site = await agentSite(t, { polls: [{ ...approved(), delay: 60 }] });
+  const f = flows(t, site.origin, data);
+  assert.ok((await f.begin()).ok);
+  for (let i = 0; i < 100 && site.polls().length === 0; i++) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(site.polls().length, 1, "the poll is on the wire");
+  await f.end();
+  assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false, "nothing renamed into place after end()");
+  assert.deepEqual(fs.readdirSync(data), []);
 });
 
 test("openInBrowser opens only a link on the configured origin, with fixed arguments and no shell", () => {
@@ -304,6 +365,21 @@ test("currentAccount: a 401 deletes the saved token and says to connect again", 
   assert.equal(account.problems[0]!.code, "sign-in");
   assert.match(account.problems[0]!.fix, /connect_account/);
   assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
+});
+
+test("currentAccount: a 401 without the site's JSON error (a preview's own protection) keeps the token", async (t) => {
+  for (const answer of [
+    { status: 401, body: null, text: "<!doctype html><title>Authentication Required</title>" },
+    { status: 401, body: { message: "not ours" } },
+  ]) {
+    const data = temp(t, "mm-connect-");
+    const site = await agentSite(t, { status: () => answer });
+    await writeToken(data, site.origin, TOKEN);
+    const account = await currentAccount(site.origin, data, globalThis.fetch);
+    assert.equal(account.ok, false);
+    if (!account.ok) assert.equal(account.problems[0]!.code, "site");
+    assert.ok(fs.existsSync(path.join(data, TOKEN_FILE)), JSON.stringify(answer));
+  }
 });
 
 test("currentAccount: a site that cannot answer keeps the token and refuses as site", async (t) => {

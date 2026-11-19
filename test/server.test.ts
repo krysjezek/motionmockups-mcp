@@ -188,6 +188,8 @@ test("the tools are the six documented ones", async (t) => {
   for (const tool of tools) {
     assert.doesNotMatch(tool.description!, /cinematic|stunning|studio-grade|in seconds|AI-powered|super easy/i);
   }
+  // disconnect deletes the saved connection.
+  assert.equal(tools.find((tool) => tool.name === "connect_account")!.annotations?.destructiveHint, true);
 });
 
 test("list_scenes filters by device", async (t) => {
@@ -713,23 +715,48 @@ test("connect_account: a declined sign-in is a sign-in refusal naming connect_ac
   assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
 });
 
-test("connect_account: cancelling the wait ends the sign-in", async (t) => {
-  const { client, site } = await onSite(t, { polls: [pending] });
+test("connect_account: a cancelled wait (a client's request timeout) leaves the sign-in polling; disconnect ends it", async (t) => {
+  const { client, site, data } = await onSite(t, { polls: [pending] });
   await client.callTool({ name: "connect_account", arguments: {} });
   const controller = new AbortController();
   const waiting = client.callTool({ name: "connect_account", arguments: { wait: true } }, undefined, { signal: controller.signal });
   waiting.catch(() => {});
-  await new Promise((resolve) => setTimeout(resolve, 80));
-  controller.abort("the person stopped it");
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  controller.abort("the client's request timed out");
   await assert.rejects(waiting);
-  // A poll already on the wire when the cancel came may still land; none is sent after it.
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Still polled: the person can approve after the client gave up waiting.
   const polls = site.polls().length;
   await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.equal(site.polls().length, polls, "no poll after the cancel");
+  assert.ok(site.polls().length > polls, "polling goes on after the cancel");
+  // The same code is still the one to approve.
+  const again = structured(await client.callTool({ name: "connect_account", arguments: {} }));
+  assert.equal(again.userCode, USER_CODE);
+  assert.equal(site.seen.filter((s) => s.path === "/api/agent/connect/start").length, 1);
+  // Disconnect ends it.
+  await client.callTool({ name: "connect_account", arguments: { disconnect: true } });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const stopped = site.polls().length;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(site.polls().length, stopped, "no poll after disconnect");
   const after = await client.callTool({ name: "connect_account", arguments: { wait: true } });
   assert.equal(after.isError, true);
   assert.match(structured(after).problems[0].message, /No sign-in is waiting/);
+  assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
+});
+
+test("connect_account: after a cancelled wait, a later approval is saved and a new wait reports it", async (t) => {
+  const { client, data } = await onSite(t, { polls: [pending, pending, pending, pending, pending, pending, approved()], status: statusFor(true) });
+  await client.callTool({ name: "connect_account", arguments: {} });
+  const controller = new AbortController();
+  const waiting = client.callTool({ name: "connect_account", arguments: { wait: true } }, undefined, { signal: controller.signal });
+  waiting.catch(() => {});
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  controller.abort();
+  await assert.rejects(waiting);
+  const waited = await client.callTool({ name: "connect_account", arguments: { wait: true } });
+  assert.notEqual(waited.isError, true, JSON.stringify(structured(waited)));
+  assert.equal(structured(waited).tier, "pro");
+  assert.ok(fs.existsSync(path.join(data, TOKEN_FILE)));
 });
 
 test("connect_account: wait reports progress with the code, and stopping the server ends the sign-in", async (t) => {
@@ -838,6 +865,59 @@ test("render picks the tier by the account's status, once per render", async (t)
     assert.equal(calls.length, 0);
     assert.ok(fs.existsSync(path.join(data, TOKEN_FILE)));
   }
+});
+
+test("a Pro render refused with sign-in while a new connection was saved keeps the new connection", async (t) => {
+  const project = temp(t, "mm-proj-");
+  const next = `mma_${"n".repeat(43)}`;
+  let data = "";
+  let origin: URL | undefined;
+  const fixture = await onSite(
+    t,
+    { status: statusFor(true) },
+    {
+      env: { MOTIONMOCKUPS_FOLDERS: project },
+      renderOnce: async () => {
+        // The person connected again while this render ran with the old token.
+        await writeToken(data, origin!, next);
+        return {
+          ok: false,
+          problems: [{ code: "sign-in", message: "This agent is no longer connected. Connect it again.", fix: "Connect the account again.", source: "site" }],
+        };
+      },
+    },
+  );
+  data = fixture.data;
+  origin = fixture.site.origin;
+  await writeToken(data, origin, TOKEN);
+  const result = await fixture.client.callTool({ name: "render", arguments: { plan: PLAN } });
+  assert.equal(result.isError, true);
+  assert.equal(structured(result).problems[0].code, "sign-in");
+  assert.equal(JSON.parse(fs.readFileSync(path.join(data, TOKEN_FILE), "utf8")).token, next, "the new connection stays");
+});
+
+test("a Pro render the page refuses with pro says how renders go on, with no tier the agent cannot set", async (t) => {
+  const project = temp(t, "mm-proj-");
+  const { client, site, data } = await onSite(
+    t,
+    { status: statusFor(true) },
+    {
+      env: { MOTIONMOCKUPS_FOLDERS: project },
+      renderOnce: async () => ({
+        ok: false,
+        problems: [{ code: "pro", message: "Pro has ended for this account.", fix: 'Subscribe to Pro, or set tier to "free" for a watermarked preview.', source: "site" }],
+      }),
+    },
+  );
+  await writeToken(data, site.origin, TOKEN);
+  const result = await client.callTool({ name: "render", arguments: { plan: PLAN } });
+  assert.equal(result.isError, true);
+  const [problem] = structured(result).problems;
+  assert.equal(problem.code, "pro");
+  assert.doesNotMatch(problem.fix, /tier/);
+  assert.match(problem.fix, /pricing/);
+  assert.match(problem.fix, /free watermarked preview/);
+  assert.ok(fs.existsSync(path.join(data, TOKEN_FILE)), "the connection stays");
 });
 
 test("a Pro render the page refuses with sign-in deletes the saved token and names connect_account", async (t) => {

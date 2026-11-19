@@ -16,6 +16,8 @@ export interface Answer {
   /** Raw text instead of JSON. */
   text?: string;
   headers?: Record<string, string>;
+  /** Answered after this many milliseconds. */
+  delay?: number;
 }
 
 export interface Seen {
@@ -89,8 +91,13 @@ export async function agentSite(t: TestContext, options: SiteOptions = {}): Prom
         at: performance.now(),
       });
       const send = (answer: Answer) => {
-        res.writeHead(answer.status, { "content-type": "application/json", ...answer.headers });
-        res.end(answer.text ?? JSON.stringify(answer.body));
+        const reply = () => {
+          if (res.destroyed) return;
+          res.writeHead(answer.status, { "content-type": "application/json", ...answer.headers });
+          res.end(answer.text ?? JSON.stringify(answer.body));
+        };
+        if (answer.delay) setTimeout(reply, answer.delay);
+        else reply();
       };
       const origin = `http://127.0.0.1:${(server.address() as net.AddressInfo).port}`;
       if (req.method === "GET" && url.pathname === "/agent/catalog.json" && options.catalog) return send({ status: 200, body: options.catalog });

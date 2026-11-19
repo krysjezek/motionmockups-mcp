@@ -66,7 +66,11 @@ computer:
    agent shows. If you didn't start this yourself, choose Deny.
 3. Your agent calls `connect_account` with `wait: true`, which returns once
    you approve or decline, or after 10 minutes, when the code expires. It
-   reports progress while it waits, and cancelling it ends the sign-in.
+   reports progress while it waits. Cancelling it, or the MCP client giving
+   up on it after its own request timeout, only stops that wait: the adapter
+   keeps checking for your approval until the code expires, and saves the
+   connection when you approve. The agent can wait again, or call `account`
+   once you say you approved. `disconnect: true` ends a pending sign-in.
 
 Only one sign-in runs at a time: asking again while one is pending gives the
 same code. Once connected, `account` says whether the account has Pro, and
@@ -79,8 +83,11 @@ out rather than quietly made as a watermarked preview.
 **The saved connection.** The adapter keeps a render-only agent token in one
 file, `agent-token` in its data folder (see `MOTIONMOCKUPS_DATA`), with the
 site it came from. It is written whole and then moved into place, readable by
-you alone (mode 600 on macOS and Linux; on Windows the data folder is in your
-own profile). The token is sent only to that site: a file saved for another
+you alone: mode 600 on macOS and Linux. On Windows the file takes the
+permissions of its folder: the default data folder, in your own profile
+(`%LOCALAPPDATA%`), is yours alone, but when `MOTIONMOCKUPS_DATA` points
+elsewhere the file is as private as that folder, so choose one only you can
+read. The token is sent only to that site: a file saved for another
 site, after `MOTIONMOCKUPS_ORIGIN` changed, is refused, never sent. It never
 appears in a tool result, a progress report, an error or the adapter's log,
 and it reaches the site's agent page only inside Chrome's control pipe,
@@ -94,7 +101,8 @@ token stays valid on the account until you revoke it: on motionmockups.com,
 open Account, then Connected agents, and choose Revoke. It also stops
 working after 90 days without use, or when the account is deleted. Once the
 site no longer accepts it, the adapter deletes the file itself and says to
-connect again.
+connect again. When Pro ends, the connection stays and renders become free
+watermarked previews; renew Pro for clean renders again.
 
 ## What it reads and writes
 

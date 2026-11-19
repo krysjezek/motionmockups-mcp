@@ -255,8 +255,10 @@ export async function currentAccount(origin: URL, data: string, fetchImpl: typeo
     if (signal?.aborted) throw signal.reason;
     return { ok: false, problems: [siteProblem(origin, what, failure(error))] };
   }
-  if (reply.status === 401) {
-    await clearToken(data).catch(() => {});
+  // Only the site's own 401, with its JSON error: a preview's deployment protection answers 401
+  // too, and that says nothing about the token.
+  if (reply.status === 401 && isObject(reply.body) && typeof reply.body.error === "string") {
+    await clearToken(data, token).catch(() => {});
     return refuse(
       "sign-in",
       "The site says this agent is no longer connected: its access was revoked, went unused for 90 days, or the account was deleted. The saved connection on this computer was deleted.",
@@ -321,22 +323,32 @@ interface Flow {
   listeners: Set<(message: string) => void>;
 }
 
-const cancelled = (): Problem => ({
+const ended = (): Problem => ({
   code: "cancelled",
-  message: "The sign-in was cancelled; the code no longer works.",
+  message: "The sign-in was ended; the code no longer works.",
   fix: "Call connect_account again when the person wants to connect.",
+});
+
+const stoppedWaiting = (f: Flow): Problem => ({
+  code: "cancelled",
+  message: `Stopped waiting. The sign-in goes on: code ${f.started.userCode} can still be approved at ${f.started.url} until it expires.`,
+  fix: "Call connect_account with wait: true to wait again, or account once the person says they approved it.",
 });
 
 /**
  * One sign-in at a time per adapter. `begin()` starts one (or gives the pending one's code) and
  * polls in the background until it is approved, declined, expired or ended; an approval is saved
- * even with nobody waiting. `wait()` waits for its outcome, reporting each poll; cancelling the
- * wait ends the sign-in. A second wait at the same time is refused as busy.
+ * even with nobody waiting. `wait()` waits for its outcome, reporting each poll; cancelling a
+ * wait only stops that wait (a client's own request timeout cancels too), never the sign-in.
+ * A second wait at the same time is refused as busy. `end()` stops the sign-in and returns only
+ * once every run it stopped has finished, so nothing is saved after it.
  */
 export function connectFlows(deps: ConnectDeps) {
   const scale = deps.timeScale ?? 1;
   let flow: Flow | undefined;
   let starting: Promise<Checked<Started>> | undefined;
+  /** Every run not yet finished, the current one and any ended ones. */
+  const runs = new Set<Promise<unknown>>();
 
   const run = async (f: Flow): Promise<Checked<{ label: string }>> => {
     const signal = f.controller.signal;
@@ -367,7 +379,8 @@ export function connectFlows(deps: ConnectDeps) {
           continue;
         }
         if (poll.kind === "end") return { ok: false, problems: [poll.problem] };
-        // Approved: the new token replaces the saved one only now.
+        // Approved: the new token replaces the saved one only now, unless the sign-in was ended.
+        if (signal.aborted) return { ok: false, problems: [ended()] };
         try {
           await writeToken(deps.data, deps.origin, poll.token);
         } catch (error) {
@@ -377,7 +390,7 @@ export function connectFlows(deps: ConnectDeps) {
         return { ok: true, value: { label: poll.label } };
       }
     } catch {
-      if (signal.aborted) return { ok: false, problems: [cancelled()] };
+      if (signal.aborted) return { ok: false, problems: [ended()] };
       return { ok: false, problems: [siteProblem(deps.origin, "Signing in", "the adapter stopped unexpectedly")] };
     } finally {
       f.finished = true;
@@ -387,9 +400,8 @@ export function connectFlows(deps: ConnectDeps) {
   const end = async () => {
     const f = flow;
     flow = undefined;
-    if (!f) return;
-    f.controller.abort();
-    await f.done;
+    f?.controller.abort();
+    await Promise.all([...runs]);
   };
 
   return {
@@ -415,6 +427,8 @@ export function connectFlows(deps: ConnectDeps) {
           listeners: new Set(),
         };
         f.done = run(f);
+        const tracked = f.done.finally(() => runs.delete(tracked));
+        runs.add(tracked);
         flow = f;
         return { ok: true, value: { ...s.value, reused: false } };
       } finally {
@@ -437,17 +451,19 @@ export function connectFlows(deps: ConnectDeps) {
           "Another connect_account call is already waiting for this sign-in.",
           "Wait for that call to return, or cancel it first.",
         );
+      if (signal.aborted) return { ok: false, problems: [stoppedWaiting(f)] };
       f.waiting = true;
       f.listeners.add(onWait);
-      const onAbort = () => {
-        if (flow === f) flow = undefined;
-        f.controller.abort();
-      };
-      if (signal.aborted) onAbort();
-      else signal.addEventListener("abort", onAbort, { once: true });
+      let onAbort = () => {};
+      const aborted = new Promise<"aborted">((resolve) => {
+        onAbort = () => resolve("aborted");
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
       try {
         if (!f.finished) onWait(`Waiting for the person to approve code ${f.started.userCode} at ${f.started.url}.`);
-        const outcome = await f.done;
+        const outcome = await Promise.race([f.done, aborted]);
+        // Only this wait stops; the sign-in goes on and the next wait picks it up.
+        if (outcome === "aborted") return { ok: false, problems: [stoppedWaiting(f)] };
         // Reported once: the next wait has nothing to wait for.
         if (flow === f) flow = undefined;
         return outcome;

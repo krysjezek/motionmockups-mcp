@@ -142,6 +142,21 @@ test("clearToken removes the file and is fine when there is none", async (t) => 
   assert.deepEqual(await readToken(data, ORIGIN), { ok: true, value: null });
 });
 
+test("clearToken with an expected token deletes only that token, never one saved since", async (t) => {
+  const data = temp(t, "mm-token-");
+  const next = `mma_${"n".repeat(43)}`;
+  await writeToken(data, ORIGIN, next);
+  // The refused token was replaced by a new connection: the new one stays.
+  assert.equal(await clearToken(data, TOKEN), false);
+  assert.deepEqual(await readToken(data, ORIGIN), { ok: true, value: next });
+  assert.equal(await clearToken(data, next), true);
+  assert.deepEqual(await readToken(data, ORIGIN), { ok: true, value: null });
+  // A damaged file is not the expected token either.
+  fs.writeFileSync(path.join(data, TOKEN_FILE), "{ damaged");
+  assert.equal(await clearToken(data, TOKEN), false);
+  assert.ok(fs.existsSync(path.join(data, TOKEN_FILE)));
+});
+
 test("redact replaces every agent token in a text", () => {
   assert.equal(redact(`a ${TOKEN} b ${TOKEN}`), "a [agent token] b [agent token]");
   assert.equal(redact("nothing here"), "nothing here");

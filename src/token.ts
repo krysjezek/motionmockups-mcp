@@ -147,11 +147,28 @@ export async function writeToken(data: string, origin: URL, token: string): Prom
   }
 }
 
-/** Deletes the saved token (a link is removed, never followed). True when there was one. */
-export async function clearToken(data: string): Promise<boolean> {
+/**
+ * Deletes the saved token (a link is removed, never followed). True when there was one. With
+ * `expected`, only when the saved token is that one: a token the site refused is deleted, never
+ * one a new connection saved since.
+ */
+export async function clearToken(data: string, expected?: string): Promise<boolean> {
   const file = tokenPath(data);
   try {
-    await lstat(file);
+    const st = await lstat(file);
+    if (expected !== undefined) {
+      if (!st.isFile() || st.size > MAX_BYTES) return false;
+      const handle = await open(file, constants.O_RDONLY | (posix ? constants.O_NOFOLLOW : 0));
+      let saved: unknown;
+      try {
+        saved = JSON.parse(await handle.readFile("utf8"));
+      } catch {
+        return false;
+      } finally {
+        await handle.close();
+      }
+      if ((saved as { token?: unknown } | null)?.token !== expected) return false;
+    }
   } catch {
     return false;
   }

@@ -327,7 +327,8 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
           .catch(() => {});
       };
       let result: Rendered;
-      let pro = false;
+      /** The token a Pro render was given, to delete only that one if the page refuses it. */
+      let proToken: string | undefined;
       try {
         const folders = await allowed();
         if (!folders.ok) return refused(folders.problems);
@@ -337,7 +338,7 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
         const checked = await account(controller.signal);
         if (!checked.ok) return refused(checked.problems);
         const now = checked.value;
-        pro = now.connected && now.pro;
+        if (now.connected && now.pro) proToken = now.token;
         result = await deps.renderOnce(request, {
           origin: deps.origin,
           allowed: folders.value,
@@ -346,24 +347,35 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
           signal: controller.signal,
           timeoutMs: deps.timeoutMs,
           onProgress,
-          ...(now.connected && now.pro ? { pro: { accessToken: now.token } } : {}),
+          ...(proToken ? { pro: { accessToken: proToken } } : {}),
         });
       } catch (error) {
         result = { ok: false, problems: [unexpected(error)] };
       }
-      // The page could not sign its plates with the token: it no longer works (revoked, idle
-      // or the account deleted). The saved connection goes, so the next render is free.
-      if (!result.ok && pro && result.problems.some((p) => p.code === "sign-in")) {
-        await clearToken(deps.data).catch(() => {});
-        const problems = result.problems.map((p): Problem =>
-          p.code === "sign-in"
-            ? {
-                code: "sign-in",
-                message: `${p.message} The saved connection on this computer was deleted.`,
-                fix: "Call connect_account to connect the account again, then send the request again. Until then renders are free watermarked previews.",
-              }
-            : p,
-        );
+      if (!result.ok && proToken) {
+        // The page could not sign its plates with the token: it no longer works (revoked, idle
+        // or the account deleted). That token goes (never one a new connection saved since), so
+        // the next render is free.
+        const refusedToken = result.problems.some((p) => p.code === "sign-in");
+        if (refusedToken) await clearToken(deps.data, proToken).catch(() => {});
+        // The page's fixes speak of a `tier` the agent cannot set: the adapter picks it.
+        const problems = result.problems.map((p): Problem => {
+          if (p.code === "sign-in")
+            return {
+              code: "sign-in",
+              message: `${p.message} The saved connection on this computer was deleted.`,
+              fix: "Call connect_account to connect the account again, then send the request again. Until then renders are free watermarked previews.",
+            };
+          if (p.code === "pro")
+            return {
+              code: "pro",
+              message: p.message,
+              fix:
+                `Send the request again for a free watermarked preview: the adapter checks the account before every render. ` +
+                `For clean renders, renew Motion Mockups Pro (${PRICING}).`,
+            };
+          return p;
+        });
         result = result.saved ? { ok: false, problems, saved: result.saved } : { ok: false, problems };
       }
       return result.ok ? answer({ ...result.value }) : refused(result.problems, result.saved);
@@ -507,7 +519,7 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
       description:
         "Connect the person's Motion Mockups account, for clean Pro renders. Gives a link and code to show the person; then call again with wait: true until they approve. disconnect: true deletes the saved connection.",
       inputSchema: connectInput,
-      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },
     async ({ wait, open, disconnect }, extra) => {
       if (disconnect) {
