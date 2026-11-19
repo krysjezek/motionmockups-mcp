@@ -1,0 +1,11 @@
+{
+  "name": "motionmockups",
+  "version": "0.0.1",
+  "description": "Motion Mockups for AI agents: art-directed device mockup videos, rendered on your computer. Coming soon.",
+  "homepage": "https://motionmockups.com",
+  "license": "UNLICENSED",
+  "author": "Krystof Jezek <hello@motionmockups.com>",
+  "bin": { "motionmockups": "index.js" },
+  "files": ["index.js", "README.md"],
+  "keywords": ["motion mockups", "mockup", "device mockup", "mcp", "video"]
+}
