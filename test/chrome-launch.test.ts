@@ -38,9 +38,12 @@ test("flags: the pipe, the profile, the proxy rule and the mode", () => {
     "--webrtc-ip-handling-policy=disable_non_proxied_udp",
     "--password-store=basic",
     "--use-mock-keychain",
+    "--disable-breakpad",
     "--headless",
   ])
     assert.ok(headless.includes(flag), flag);
+  // Chrome 156 has no --disable-crash-reporter switch (not in its binaries); breakpad's is the one.
+  assert.ok(!headless.includes("--disable-crash-reporter"));
   // No system keyring or keychain dialog in either mode.
   for (const mode of ["headless", "window"] as const) {
     const args = chromeArgs({ executable: "chrome", profile, origin: PUBLIC, mode });

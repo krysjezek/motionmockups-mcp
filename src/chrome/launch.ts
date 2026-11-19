@@ -65,6 +65,8 @@ export function chromeArgs(options: ChromeOptions): string[] {
     // which can show the person a dialog mid-render. These keep them in the profile instead.
     "--password-store=basic",
     "--use-mock-keychain",
+    // No crash report leaves the machine (Chrome 156 has no --disable-crash-reporter switch).
+    "--disable-breakpad",
     ...(options.mode === "headless" ? ["--headless"] : ["--window-position=-32000,-32000", "--window-size=1280,800"]),
     "about:blank",
   ];
