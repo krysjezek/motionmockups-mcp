@@ -10,10 +10,7 @@ import { dataFolder } from "./paths.ts";
 import { createServer, settingsFromEnv, type AdapterServer } from "./server.ts";
 import { renderOnce } from "./session.ts";
 import type { Problem } from "./folders.ts";
-
-declare const MOTIONMOCKUPS_VERSION: string;
-
-const version = typeof MOTIONMOCKUPS_VERSION === "string" ? MOTIONMOCKUPS_VERSION : "dev";
+import { VERSION as version } from "./version.ts";
 
 const USAGE = `motionmockups ${version}
 

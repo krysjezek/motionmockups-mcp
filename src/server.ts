@@ -22,6 +22,7 @@ import { catalogSource, CATALOG_TIMEOUT_MS, serverInstructions, type AgentCatalo
 import { connectFlows, currentAccount, disconnectAccount, openInBrowser, type Account, type Launcher } from "./connect.ts";
 import { allowedFolders, type Checked, type Problem } from "./folders.ts";
 import { checkPlan, overridesOf, scenesWithNotes, suggest, tasteWarnings } from "./guidance.ts";
+import { blockedProblem } from "./killswitch.ts";
 import { planSchema as plan, type Plan } from "./plan.ts";
 import type { Progress, Rendered, RenderRequest, SessionContext } from "./session.ts";
 import { clearToken, redact } from "./token.ts";
@@ -50,7 +51,10 @@ export interface ServerDeps {
   data: string;
   chromeMode: ChromeMode;
   timeoutMs: number;
+  /** The package version at build time, "dev" unbuilt (src/version.ts); the kill switch judges it. */
   version: string;
+  /** The clock the catalog's age is measured on; tests move it. Default Date.now. */
+  now?: () => number;
   /** One line for stderr; stdout carries only the protocol. */
   log: (line: string) => void;
   /** Opens the sign-in link when connect_account is asked to; tests record it instead. */
@@ -263,16 +267,33 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   // Nothing reaches stderr with an agent token in it either.
   const log = (line: string) => deps.log(redact(line));
   const tasteOverrides = deps.tasteOverrides ?? ((plan: Plan, c: AgentCatalog) => overridesOf(tasteWarnings(plan, c)));
-  const catalog = catalogSource(deps.origin, deps.fetch, CATALOG_TIMEOUT_MS);
-  // What the adapter left out of the site's guidance, said once per start.
-  let noted = false;
-  const note = (c: AgentCatalog) => {
-    if (noted) return;
-    noted = true;
-    for (const line of c.ignored ?? []) log(`motionmockups: ${line}`);
+  const catalog = catalogSource(deps.origin, deps.fetch, CATALOG_TIMEOUT_MS, deps.now);
+  // What the adapter left out of the site's guidance, each line said once per start, and
+  // whether the site blocks this version (src/killswitch.ts), said once each time it begins.
+  const noted = new Set<string>();
+  let wasBlocked = false;
+  const inspect = (c: AgentCatalog): Problem | undefined => {
+    for (const line of c.ignored ?? []) {
+      if (noted.has(line)) continue;
+      noted.add(line);
+      log(`motionmockups: ${line}`);
+    }
+    const blocked = blockedProblem(c.adapters, deps.version);
+    if (blocked && !wasBlocked) log(`motionmockups: this version (${deps.version}) is blocked by the site: ${blocked.message} ${blocked.fix}`);
+    wasBlocked = !!blocked;
+    return blocked;
+  };
+  /**
+   * The kill switch, checked on the catalog as it is now (read again once 10 minutes old):
+   * the refusal when the site blocks this version. A catalog that cannot be read blocks
+   * nothing; the tools that need it say so themselves.
+   */
+  const blockedNow = async (): Promise<Problem | undefined> => {
+    const result = await catalog.get();
+    return result.ok ? inspect(result.value) : undefined;
   };
   const first = await catalog.get();
-  if (first.ok) note(first.value);
+  if (first.ok) inspect(first.value);
   const instructions = serverInstructions(first, log);
   // Tool descriptions from the site when it gives them (fetched before the tools register);
   // the built-in text otherwise, or when the catalog could not be read at start.
@@ -332,6 +353,9 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   let stopping = false;
 
   const render = async (request: RenderRequest, extra: Extra): Promise<CallToolResult> => {
+    // Checked when the call arrives: a block set later never stops a render already running.
+    const blocked = await blockedNow();
+    if (blocked) return refused([blocked]);
     const controller = new AbortController();
     const onAbort = () => controller.abort(extra.signal.reason);
     if (extra.signal.aborted || stopping) controller.abort(extra.signal.reason);
@@ -424,7 +448,8 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   const withCatalog = async (use: (c: AgentCatalog) => CallToolResult): Promise<CallToolResult> => {
     const result = await catalog.get();
     if (!result.ok) return refused(result.problems);
-    note(result.value);
+    const blocked = inspect(result.value);
+    if (blocked) return refused([blocked]);
     return use(result.value);
   };
 
@@ -603,6 +628,10 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
               : `The saved connection was deleted from this computer; renders are free watermarked previews. The site did not confirm that it revoked the connection (${detail ?? "no answer"}). ${REVOKE}`,
         });
       }
+
+      // A blocked adapter connects no account; disconnecting (above) and account stay open.
+      const blocked = await blockedNow();
+      if (blocked) return refused([blocked]);
 
       if (wait) {
         if (open) return refused([{ code: "input", message: "open cannot be combined with wait.", fix: "Send open with the first call, without wait." }]);

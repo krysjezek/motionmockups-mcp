@@ -2,11 +2,14 @@
 // recorded and the briefing the agent reads. It belongs to the site, so the owner changes
 // it by deploying; the adapter only checks that it is what it says it is.
 //
-// Kept for the life of the process once a good one arrives (a server lives as long as the
-// agent's session). A failed fetch is tried again on the next call that needs it.
+// A good one is kept for 10 minutes, then read again by the next call that needs it, so a
+// kill switch the site sets (its `adapters` block, src/killswitch.ts) takes effect within
+// minutes. A failed fetch is tried again on the next call; a failed re-read keeps the last
+// good catalog.
 
 import { DEFAULT_ORIGIN } from "./origin.ts";
 import type { Checked, Problem } from "./folders.ts";
+import { checkAdapters, type Adapters } from "./killswitch.ts";
 
 /**
  * A scene's director's notes. Every field is optional here: a site may drop or add one, and
@@ -100,6 +103,8 @@ export interface AgentCatalog {
   recipes?: Recipe[];
   /** Tool name to description, each a non-empty string of at most MAX_TOOL_TEXT characters. */
   toolText?: Record<string, string>;
+  /** The adapter versions the site serves; absent (or unreadable) allows every version. */
+  adapters?: Adapters;
   /** What the adapter left out of the site's guidance, one line each, for stderr once. */
   ignored?: string[];
 }
@@ -192,6 +197,12 @@ export function checkCatalog(value: unknown): AgentCatalog | string {
     }),
     ...cleanGuidance(value, ignored),
   };
+  if (value.adapters !== undefined) {
+    // Never a lock-out by accident: a block that cannot be read is as if it were not there.
+    const adapters = checkAdapters(value.adapters);
+    if (typeof adapters === "string") ignored.push(`the site's adapters block ${adapters}; it is ignored, and every version of this adapter is allowed.`);
+    else catalog.adapters = adapters;
+  }
   if (ignored.length) catalog.ignored = ignored;
   return catalog;
 }
@@ -407,19 +418,24 @@ export async function fetchCatalog(origin: URL, fetchImpl: typeof fetch, timeout
   return { ok: true, value: checked };
 }
 
+/** How long a good catalog is used before the next call reads it again. */
+export const CATALOG_MAX_AGE_MS = 10 * 60_000;
+
 /**
- * The catalog for a server: `get()` gives the one kept, or fetches again. Calls made while
- * a fetch runs share it.
+ * The catalog for a server: `get()` gives the one kept while it is younger than
+ * CATALOG_MAX_AGE_MS on `now`, or fetches again. Calls made while a fetch runs share it. A
+ * re-read that fails gives the last good catalog, and the next call tries again.
  */
-export function catalogSource(origin: URL, fetchImpl: typeof fetch, timeoutMs = CATALOG_TIMEOUT_MS) {
-  let good: AgentCatalog | undefined;
+export function catalogSource(origin: URL, fetchImpl: typeof fetch, timeoutMs = CATALOG_TIMEOUT_MS, now: () => number = Date.now) {
+  let good: { value: AgentCatalog; at: number } | undefined;
   let running: Promise<Checked<AgentCatalog>> | undefined;
   return {
     get(): Promise<Checked<AgentCatalog>> {
-      if (good) return Promise.resolve({ ok: true, value: good });
+      if (good && now() - good.at < CATALOG_MAX_AGE_MS) return Promise.resolve({ ok: true, value: good.value });
       running ??= fetchCatalog(origin, fetchImpl, timeoutMs)
-        .then((result) => {
-          if (result.ok) good = result.value;
+        .then((result): Checked<AgentCatalog> => {
+          if (result.ok) good = { value: result.value, at: now() };
+          else if (good) return { ok: true, value: good.value };
           return result;
         })
         .finally(() => (running = undefined));

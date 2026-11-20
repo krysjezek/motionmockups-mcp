@@ -250,6 +250,46 @@ A render with a connected Pro account says:
 
 > Clean, full-quality render with Motion Mockups Pro.
 
+## Kill switch
+
+The site can stop an adapter version that must not be used, for instance one
+with a bug that loses renders. Its scene list may carry:
+
+```json
+"adapters": { "allowed": ">=0.1.0", "blocked": ["0.1.3"], "message": "0.1.3 loses renders. Update the adapter." }
+```
+
+A version outside `allowed`, or listed in `blocked`, answers every tool with
+a refusal of code `blocked`: the site's message (at most 500 characters) and
+a fix that names the update, `npx motionmockups@latest` or a newer Claude
+Desktop extension. `account` and `connect_account` with `disconnect: true`
+keep working, so a connection can still be removed. The tools and their
+descriptions stay as they were; only the results refuse.
+
+The adapter reads the scene list at start and again on the first call after
+it is 10 minutes old, so a block takes effect within minutes. A render that
+had already started finishes; the next call is refused. If the list cannot
+be read again, the last one read stays in force.
+
+The block can never shut everyone out by mistake: a site without an
+`adapters` block allows every version, and a block the adapter cannot read
+(a range outside the subset below, or a field of the wrong type) is treated
+as absent, with one note on stderr. An adapter run from its sources, not
+built, has the version `dev` and is never checked.
+
+`allowed` is a small subset of npm's ranges:
+
+- comparators separated by spaces, all of which must hold: `>=`, `>`, `<`,
+  `<=` or `=` directly followed by `MAJOR.MINOR.PATCH`, as in
+  `>=0.1.0 <0.3.0`; a bare version means `=`;
+- `^MAJOR.MINOR.PATCH`, up to the next change of the first non-zero part:
+  `^1.2.3` is `>=1.2.3 <2.0.0-0`, `^0.2.3` is `>=0.2.3 <0.3.0-0`;
+- a version may carry a prerelease (`0.2.0-beta.1`), which is lower than
+  its release, and build metadata (`+…`), which is not compared.
+
+Not read: `~`, `x` and `*`, `||`, hyphen ranges and a space between an
+operator and its version. Each entry in `blocked` is one exact version.
+
 ## Known limits
 
 - **A network that needs an HTTP proxy cannot render.** The adapter's Chrome
