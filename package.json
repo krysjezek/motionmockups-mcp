@@ -22,6 +22,7 @@
   },
   "scripts": {
     "build": "node scripts/build.mjs",
+    "mcpb": "node scripts/mcpb.mjs",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "npm run build && node scripts/smoke.mjs"

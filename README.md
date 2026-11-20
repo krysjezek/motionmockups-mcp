@@ -9,7 +9,19 @@ art-directed device scenes and renders the mockup video in your own Google
 Chrome. Making and previewing is free, with a watermark; clean output needs
 Motion Mockups Pro.
 
-## Set up
+## Install
+
+This is a pre-release, 0.1.0. The commands below take the latest version;
+once 1.0.0 exists, these docs will pin `motionmockups@1`.
+
+It needs Node.js 20 or later and Google Chrome (Chromium on Linux). The
+server is the `mcp` command of the package.
+
+Any MCP client, as a stdio server:
+
+```sh
+npx -y motionmockups mcp
+```
 
 Claude Code:
 
@@ -17,15 +29,17 @@ Claude Code:
 claude mcp add motionmockups -- npx -y motionmockups mcp
 ```
 
+Claude Desktop: download `motionmockups.mcpb` from the
+[GitHub releases](https://github.com/krysjezek/motionmockups-mcp/releases)
+and open it with Claude Desktop. It asks for the folders Motion Mockups may
+use: your recordings are read from them and renders saved inside. The
+extension is the same single file npm publishes, with its manifest.
+
 Cursor, in `.cursor/mcp.json`:
 
 ```json
 { "mcpServers": { "motionmockups": { "command": "npx", "args": ["-y", "motionmockups", "mcp"] } } }
 ```
-
-Any other MCP client: run `npx -y motionmockups mcp` as a stdio server.
-
-It needs Node.js 20 or later and Google Chrome (Chromium on Linux).
 
 ## Tools
 
@@ -82,7 +96,7 @@ taste rule this adapter does not know is ignored with one line on stderr.
 
 | Variable | What it does |
 |---|---|
-| `MOTIONMOCKUPS_FOLDERS` | More folders the adapter may use, besides the project folders your MCP client shares. Absolute paths, separated by `;` on Windows and `:` elsewhere. |
+| `MOTIONMOCKUPS_FOLDERS` | More folders the adapter may use, besides the project folders your MCP client shares. Absolute paths, separated by `;` on Windows and `:` elsewhere. Folders given after `mcp` (`motionmockups mcp <folder> ...`, which the Claude Desktop extension uses) are added to them. |
 | `MOTIONMOCKUPS_CHROME` | The Chrome to use, when it is not installed in the usual place. A path that is wrong is refused, never passed over. |
 | `MOTIONMOCKUPS_CHROME_MODE` | `headless` (the default) or `window`. See [Chrome mode](#chrome-mode). |
 | `MOTIONMOCKUPS_TIMEOUT_MINUTES` | How long one render may run, 1 minute or more. By default 20. |
@@ -312,7 +326,11 @@ npm ci
 npm test            # unit and Chrome launch tests; Node 22.6 or later
 npm run build       # dist/motionmockups.js, the one file that is published
 node scripts/smoke.mjs
+npm run mcpb        # motionmockups.mcpb, the Claude Desktop extension, from dist
 ```
+
+Releases are published only by the release workflow, from a version tag; see
+[RELEASING.md](RELEASING.md).
 
 The render session tests need a site with the agent page:
 `MOTIONMOCKUPS_TEST_ORIGIN=http://127.0.0.1:4173 npm test`. The end-to-end

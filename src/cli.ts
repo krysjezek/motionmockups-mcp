@@ -1,4 +1,4 @@
-// The command line: `motionmockups mcp` runs the MCP server on stdio; `--version` prints
+// The command line: `motionmockups mcp [folder ...]` runs the MCP server on stdio; `--version` prints
 // the version; anything else prints the usage.
 //
 // The server's stdout carries only MCP messages, so everything else goes to stderr.
@@ -9,14 +9,15 @@ import { siteOrigin } from "./origin.ts";
 import { dataFolder } from "./paths.ts";
 import { createServer, settingsFromEnv, type AdapterServer } from "./server.ts";
 import { renderOnce } from "./session.ts";
-import type { Problem } from "./folders.ts";
+import { foldersWithArgs, type Problem } from "./folders.ts";
 import { VERSION as version } from "./version.ts";
 
 const USAGE = `motionmockups ${version}
 
-Usage: motionmockups mcp
+Usage: motionmockups mcp [folder ...]
 
-Runs the Motion Mockups MCP server on stdio, for an MCP client such as Claude Code, Cursor or Claude Desktop.`;
+Runs the Motion Mockups MCP server on stdio, for an MCP client such as Claude Code, Cursor or Claude Desktop.
+Folders given after mcp are allowed as if they were in MOTIONMOCKUPS_FOLDERS.`;
 
 const log = (line: string) => {
   try {
@@ -83,7 +84,8 @@ const [command, ...rest] = process.argv.slice(2);
 
 if (command === "--version" || command === "-v") {
   console.log(version);
-} else if (command === "mcp" && rest.length === 0) {
+} else if (command === "mcp" && !rest.some((arg) => arg.startsWith("-"))) {
+  if (rest.length > 0) process.env.MOTIONMOCKUPS_FOLDERS = foldersWithArgs(process.env.MOTIONMOCKUPS_FOLDERS, rest);
   mcp().catch((error) => {
     log(`motionmockups: the server could not start: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);

@@ -37,3 +37,17 @@ jobs:
       - run: npm run build
       - run: node scripts/smoke.mjs
       - run: npm pack --dry-run
+      # The Claude Desktop extension, built from this bundle and checked by the format's own
+      # tools, on one job; the release workflow attaches the same build to a release.
+      - name: Build and check the desktop extension
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        run: |
+          node scripts/mcpb.mjs
+          npx --yes @anthropic-ai/mcpb@2.1.2 unpack motionmockups.mcpb "$RUNNER_TEMP/mcpb"
+          npx --yes @anthropic-ai/mcpb@2.1.2 validate "$RUNNER_TEMP/mcpb/manifest.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24
+        with:
+          name: motionmockups-mcpb
+          path: motionmockups.mcpb
+          if-no-files-found: error

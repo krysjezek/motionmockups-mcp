@@ -1,0 +1,88 @@
+name: Release
+
+# Publishes motionmockups to npm, with provenance, and attaches the Claude Desktop extension
+# to a GitHub release. Only a pushed tag vX.Y.Z on the canonical repository runs it: no pull
+# request, fork or manual run can. npm trusted publishing (OIDC) authorises the publish; there
+# is no npm token anywhere. See RELEASING.md.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'krysjezek/motionmockups-mcp'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The OIDC token npm trusted publishing exchanges; no write access to the repository.
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: The tag is v + package.json's version
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match package.json version $version (expected v$version)."
+            exit 1
+          fi
+      - name: npm can publish with trusted publishing (11.5.1 or later)
+        run: |
+          npm --version
+          node -e "const [a,b,c]=process.argv[1].split('.').map(Number); process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)" "$(npm --version)" \
+            || { echo "::error::npm $(npm --version) is older than 11.5.1, which trusted publishing needs."; exit 1; }
+      - run: npm ci
+      - run: npm run typecheck
+      # Linux runners have no display: xvfb-run gives window-mode Chrome one (as in ci.yml).
+      - run: xvfb-run -a npm test
+      - run: npm run build
+      - run: node scripts/smoke.mjs
+      - name: Build and check the desktop extension
+        run: |
+          node scripts/mcpb.mjs
+          npx --yes @anthropic-ai/mcpb@2.1.2 unpack motionmockups.mcpb "$RUNNER_TEMP/mcpb"
+          npx --yes @anthropic-ai/mcpb@2.1.2 validate "$RUNNER_TEMP/mcpb/manifest.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: motionmockups-mcpb
+          path: motionmockups.mcpb
+          if-no-files-found: error
+      - run: npm pack --dry-run
+      - run: npm publish --provenance --access public
+
+  release:
+    if: github.repository == 'krysjezek/motionmockups-mcp'
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Only to create the GitHub release and attach the .mcpb; no OIDC token here.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: motionmockups-mcpb
+      - name: Create the GitHub release with the desktop extension
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          prerelease=""
+          case "$GITHUB_REF_NAME" in v0.*|*-*) prerelease="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" motionmockups.mcpb \
+            --repo "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" $prerelease \
+            --notes "npm: https://www.npmjs.com/package/motionmockups/v/${GITHUB_REF_NAME#v}. motionmockups.mcpb is the Claude Desktop extension: open it with Claude Desktop to install."

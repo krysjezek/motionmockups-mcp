@@ -157,6 +157,15 @@ export async function allowedFolders(roots: string[], env: NodeJS.ProcessEnv = p
   return out;
 }
 
+/**
+ * `MOTIONMOCKUPS_FOLDERS` with the folders given after `motionmockups mcp` added: the Claude
+ * Desktop extension passes the folders the person picked as arguments, since its manifest can
+ * expand a folder list only into arguments, never into one variable (scripts/mcpb.mjs).
+ */
+export function foldersWithArgs(current: string | undefined, args: string[]): string {
+  return [current ?? "", ...args].filter((s) => s.trim()).join(path.delimiter);
+}
+
 function outsideFix(allowed: string[]): string {
   return (
     `Use a recording inside an allowed folder (${allowed.join(", ")}), copying it there if needed, ` +
