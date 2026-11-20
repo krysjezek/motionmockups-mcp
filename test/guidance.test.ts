@@ -378,6 +378,19 @@ test("suggest_sequence never offers a wrong scene: a resolution that does not fi
   }
 });
 
+test("suggest_sequence reads a goal with spaces or hyphens and in any case", () => {
+  const value = structuredClone(GUIDED) as any;
+  value.recipes[0].goal = "case-study";
+  const c = catalog(value);
+  const ids = (goal: string) => {
+    const s = suggest({ goal, device: "Display" }, c);
+    assert.ok(s.ok, `${goal}: ${JSON.stringify(s)}`);
+    return s.value.suggestions.map((x) => x.recipe);
+  };
+  for (const goal of ["case-study", "case study", "Case Study", " CASE-study "])
+    assert.deepEqual(ids(goal), ["launch-display-low-arc-push-in"], goal);
+});
+
 test("suggest_sequence refuses an unknown device, goal, aspect or collection with the ones there are", () => {
   const refusal = (input: Parameters<typeof suggest>[0]) => {
     const s = suggest(input, C);

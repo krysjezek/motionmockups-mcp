@@ -251,7 +251,9 @@ export interface Suggestion {
 
 type Checked<T> = { ok: true; value: T } | { ok: false; problems: Problem[] };
 
-const same = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase();
+/** Names match whatever their case, and spaces and hyphens count alike ("case study" is "case-study"). */
+const key = (name: string) => name.trim().toLowerCase().replace(/[\s-]+/g, "-");
+const same = (a: string, b: string) => key(a) === key(b);
 
 /** A recipe's plan for one collection, from the site's resolved scene ids; null if they do not fit. */
 function recipePlan(recipe: Recipe, collection: string, catalog: AgentCatalog): Plan | null {

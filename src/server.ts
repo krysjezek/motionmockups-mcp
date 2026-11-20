@@ -57,6 +57,8 @@ export interface ServerDeps {
   openBrowser?: Launcher;
   /** Tests run connect_account's clock faster (see connectFlows). Default 1. */
   connectTimeScale?: number;
+  /** The taste warnings a delivered render went past, as overrides; tests replace it. */
+  tasteOverrides?: (plan: Plan, catalog: AgentCatalog) => string[];
 }
 
 /** `MOTIONMOCKUPS_TIMEOUT_MINUTES` and `MOTIONMOCKUPS_CHROME_MODE`, read strictly. */
@@ -158,7 +160,8 @@ const connectInput = z
  * put it there: the last guard, behind code that never puts one in.
  */
 const answer = (raw: Record<string, unknown>): CallToolResult => {
-  const text = redact(JSON.stringify(raw, null, 2));
+  // Compact: an unfiltered list_scenes is tens of thousands of characters, sent twice.
+  const text = redact(JSON.stringify(raw));
   return { content: [{ type: "text", text }], structuredContent: JSON.parse(text) };
 };
 
@@ -259,6 +262,7 @@ export interface AdapterServer {
 export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   // Nothing reaches stderr with an agent token in it either.
   const log = (line: string) => deps.log(redact(line));
+  const tasteOverrides = deps.tasteOverrides ?? ((plan: Plan, c: AgentCatalog) => overridesOf(tasteWarnings(plan, c)));
   const catalog = catalogSource(deps.origin, deps.fetch, CATALOG_TIMEOUT_MS);
   // What the adapter left out of the site's guidance, said once per start.
   let noted = false;
@@ -395,9 +399,15 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
         result = result.saved ? { ok: false, problems, saved: result.saved } : { ok: false, problems };
       }
       if (!result.ok) return refused(result.problems, result.saved);
-      // Taste never refuses a render: the warnings the plan went past are listed with it.
-      const known = await catalog.get();
-      const overrides = known.ok ? overridesOf(tasteWarnings(request.plan as Plan, known.value)) : [];
+      // Taste never refuses a render: the warnings the plan went past are listed with it. The
+      // render is delivered whatever happens here, so a failing taste check lists none.
+      let overrides: string[] = [];
+      try {
+        const known = await catalog.get();
+        if (known.ok) overrides = tasteOverrides(request.plan as Plan, known.value);
+      } catch (error) {
+        log(`motionmockups: the taste check after a render failed (${error instanceof Error ? error.message : String(error)}); no overrides are listed.`);
+      }
       return answer({ ...result.value, ...(overrides.length ? { overrides } : {}) });
     })();
     const entry = { controller, done: work.catch(() => {}) };

@@ -88,6 +88,7 @@ async function start(
     origin?: URL;
     data?: string;
     openBrowser?: Launcher;
+    tasteOverrides?: ServerDeps["tasteOverrides"];
   } = {},
 ): Promise<Started> {
   const calls: Call[] = [];
@@ -108,6 +109,7 @@ async function start(
     // 5 s of the site's poll interval is 25 ms here.
     connectTimeScale: 0.005,
     openBrowser: options.openBrowser ?? (() => assert.fail("a test opened a browser")),
+    ...(options.tasteOverrides ? { tasteOverrides: options.tasteOverrides } : {}),
   };
   const adapter = await createServer(deps);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -223,8 +225,10 @@ test("list_scenes filters by device", async (t) => {
     structured(iphone).scenes.map((s: any) => s.id),
     ["blanc-iphone-shot-1", "maison-iphone-shot-1"],
   );
-  // The text content is the same JSON, for clients that read only text.
-  assert.deepEqual(JSON.parse((iphone.content as any)[0].text), structured(iphone));
+  // The text content is the same JSON, compact, for clients that read only text.
+  const text = (iphone.content as any)[0].text as string;
+  assert.deepEqual(JSON.parse(text), structured(iphone));
+  assert.equal(text, JSON.stringify(structured(iphone)));
   const gallery = structured(await client.callTool({ name: "list_scenes", arguments: { device: "iPhone", collection: "gallery" } }));
   assert.deepEqual(
     gallery.scenes.map((s: any) => s.id),
@@ -1168,6 +1172,25 @@ test("render and still go past taste warnings and list them under overrides; a q
     arguments: { plan: DISPLAY_PLAN([{ scene: "showroom-xdr-shot-1", seconds: 4 }, { scene: "showroom-xdr-shot-2", seconds: 4 }]) },
   });
   assert.equal("overrides" in structured(quiet), false);
+});
+
+test("a taste check that throws after a render leaves the render delivered, with no overrides and one stderr line", async (t) => {
+  const project = temp(t, "mm-proj-");
+  const logged: string[] = [];
+  const { client, calls } = await guided(t, GUIDED, {
+    env: { MOTIONMOCKUPS_FOLDERS: project },
+    log: (l) => logged.push(l),
+    tasteOverrides: () => {
+      throw new Error("bad taste value");
+    },
+  });
+  const plan = DISPLAY_PLAN([{ scene: "showroom-xdr-shot-3", seconds: 4 }, { scene: "showroom-xdr-shot-6", seconds: 4 }]);
+  const result = await client.callTool({ name: "render", arguments: { plan } });
+  assert.notEqual(result.isError, true, JSON.stringify(structured(result)));
+  assert.equal(calls.length, 1);
+  assert.equal(structured(result).files.length, 1);
+  assert.equal("overrides" in structured(result), false);
+  assert.deepEqual(logged, ["motionmockups: the taste check after a render failed (bad taste value); no overrides are listed."]);
 });
 
 test("a render the page refuses lists no overrides", async (t) => {

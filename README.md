@@ -33,7 +33,7 @@ It needs Node.js 20 or later and Google Chrome (Chromium on Linux).
 |---|---|
 | `list_scenes` | The scenes you can render, by device or collection: id, title, length, poster and the designer's notes. |
 | `recording_spec` | What to record for a device: screen size, frame rate, file types. |
-| `suggest_sequence` | Plans for a goal (launch, app demo, case study or portfolio) on one device, from the designer's sequences, each with its reason. |
+| `suggest_sequence` | Plans for a goal (`launch`, `app-demo`, `case-study` or `portfolio`) on one device, from the designer's sequences, each with its reason. |
 | `check_plan` | Checks a plan before a render: the problems the render would refuse, and the designer's taste as warnings. |
 | `render` | Renders a plan into a video, with the recording on the device screen. Lists any taste warning it went past under `overrides`. |
 | `still` | Renders one frame of a plan as a PNG or JPEG, with `overrides` as `render`. |
