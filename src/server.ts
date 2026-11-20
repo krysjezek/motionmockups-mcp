@@ -676,6 +676,7 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
         note:
           "Show the person this link and code. They open the link, sign in to Motion Mockups and approve if the code matches. " +
           'The page says what the agent can do: "Render with your Pro plates. It cannot change your account, billing, projects or saved recordings." ' +
+          "The page also has an optional name field, which their account's list of connected agents shows: suggest a short name they can type there, such as your own name. " +
           "Then call connect_account with wait: true; it returns once they approve or decline.",
       });
     },

@@ -709,6 +709,9 @@ test("connect_account gives the link and code at once; wait returns once approve
   assert.equal(first.opened, undefined, "no browser unless asked");
   assert.match(first.note, /Render with your Pro plates\. It cannot change your account, billing, projects or saved recordings\./);
   assert.match(first.note, /wait: true/);
+  // The page has an optional name field; the agent suggests a name, the person types it.
+  assert.match(first.note, /suggest a short name/i);
+  assert.match(first.note, /your own name/i);
   assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false, "nothing saved before approval");
 
   const waited = await client.callTool({ name: "connect_account", arguments: { wait: true } });
@@ -724,6 +727,8 @@ test("connect_account gives the link and code at once; wait returns once approve
   assert.equal(again.connected, true);
   assert.match(again.note, /disconnect: true/);
   assert.equal(site.seen.filter((s) => s.path === "/api/agent/connect/start").length, 1);
+  // The adapter never sends a label: the person names the agent on the page.
+  for (const s of site.seen) assert.doesNotMatch(s.body, /label/, `${s.path} sends no label`);
 });
 
 test("connect_account with open: true opens the link once, with fixed arguments", async (t) => {
