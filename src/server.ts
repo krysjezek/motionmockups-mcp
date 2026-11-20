@@ -1,10 +1,12 @@
-// The MCP server: six tools over the site's catalog, the person's account and one render at
+// The MCP server: eight tools over the site's catalog, the person's account and one render at
 // a time in the person's Chrome. Every refusal is a tool result with `isError: true` and `{ problems }`,
 // never a thrown error, so the agent always gets a `fix` to act on.
 //
 // Tool inputs are strict: an object with a field the tool does not document is refused
 // before anything runs, so nothing an agent sends reaches the adapter's internals. The
 // plan is typed for the agent but passed to the page unchanged; the page enforces its rules.
+// check_plan previews them, and the designer's taste is only ever a warning (src/guidance.ts):
+// notes and recipes are data in tool results, and only the capped briefing is instructions.
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { RequestHandlerExtra } from "@modelcontextprotocol/sdk/shared/protocol.js";
@@ -19,6 +21,8 @@ import { z } from "zod";
 import { catalogSource, CATALOG_TIMEOUT_MS, serverInstructions, type AgentCatalog } from "./catalog.ts";
 import { connectFlows, currentAccount, disconnectAccount, openInBrowser, type Account, type Launcher } from "./connect.ts";
 import { allowedFolders, type Checked, type Problem } from "./folders.ts";
+import { checkPlan, overridesOf, scenesWithNotes, suggest, tasteWarnings } from "./guidance.ts";
+import { planSchema as plan, type Plan } from "./plan.ts";
 import type { Progress, Rendered, RenderRequest, SessionContext } from "./session.ts";
 import { clearToken, redact } from "./token.ts";
 
@@ -92,47 +96,6 @@ export function settingsFromEnv(env: NodeJS.ProcessEnv): Checked<{ timeoutMs: nu
 
 // ---- Tool inputs ----
 
-const crop = z
-  .object({
-    x: z.number().optional().describe("Horizontal position of the crop, 0 (left) to 1 (right)."),
-    y: z.number().optional().describe("Vertical position of the crop, 0 (top) to 1 (bottom)."),
-    zoom: z.number().optional().describe("1 (the whole scene) to 3."),
-  })
-  .strict();
-
-const clip = z
-  .object({
-    scene: z.string().min(1).describe("A scene id from list_scenes, of the plan's device."),
-    seconds: z.number().optional().describe("How long the clip runs in the finished film. Without it, the scene's own length."),
-    reversed: z.boolean().optional().describe("Play the scene's camera move backwards."),
-    crop: crop.optional().describe("Frame part of the scene."),
-  })
-  .strict();
-
-const plan = z
-  .object({
-    contract: z.literal(1).describe("Always 1."),
-    device: z.string().min(1).describe("One device from the catalog (Display, iPhone, MacBook, iPad or TV). Every clip is a scene of it."),
-    clips: z.array(clip).min(1).describe("The scenes in order. One clip is one scene."),
-    aspect: z.string().min(1).describe('The frame: "1:1", "4:3", "16:9", "4:5" or "9:16".'),
-    size: z.number().optional().describe("Short edge in pixels with Pro: 1080 or 2160. Free previews are smaller."),
-    delivery: z.enum(["film", "scenes"]).optional().describe('"film" (default) joins the clips into one video; "scenes" gives one video per clip.'),
-    speedRamp: z.union([z.literal("off"), z.literal(50), z.literal(100)]).optional().describe('Ease into and out of each move: "off", 50 or 100.'),
-    reflections: z.union([z.literal(0), z.literal(50), z.literal(100)]).optional().describe("Screen reflections: 0, 50 or 100."),
-    hideNotch: z.boolean().optional().describe("Remove the notch from iPhone and MacBook scenes."),
-    keepStatusBar: z.boolean().optional().describe("Keep the recording's own iOS status bar instead of the cleaned one."),
-    background: z
-      .object({
-        top: z.string().describe("#rrggbb"),
-        bottom: z.string().describe("#rrggbb"),
-      })
-      .strict()
-      .optional()
-      .describe("The backdrop gradient, for scenes that have one."),
-  })
-  .strict()
-  .describe("What to render. The site checks it and refuses with a fix when something does not fit.");
-
 const recording = z
   .string()
   .min(1)
@@ -158,6 +121,16 @@ const stillInput = z
     format: z.enum(["png", "jpeg"]).describe("png or jpeg."),
   })
   .strict();
+const suggestInput = z
+  .object({
+    goal: z.string().min(1).max(100).describe('What the film is for: "launch", "app-demo", "case-study" or "portfolio".'),
+    device: z.string().min(1).max(100).describe("The device the product runs on."),
+    aspect: z.string().min(1).max(20).optional().describe("The frame wanted, such as 9:16 for a phone feed. Plans in it come first."),
+    seconds: z.number().positive().optional().describe("The film length wanted, in seconds. Plans nearest it come first."),
+    collection: z.string().min(1).max(100).optional().describe("Only this collection's plans, such as Loft."),
+  })
+  .strict();
+const checkInput = z.object({ plan }).strict();
 const accountInput = z.object({}).strict();
 const connectInput = z
   .object({
@@ -200,7 +173,30 @@ const unexpected = (error: unknown): Problem => ({
   fix: "Try again. If it keeps failing, report it at https://motionmockups.com/contact.",
 });
 
-export const TOOL_NAMES = ["list_scenes", "recording_spec", "render", "still", "account", "connect_account"] as const;
+export const TOOL_NAMES = ["list_scenes", "recording_spec", "suggest_sequence", "check_plan", "render", "still", "account", "connect_account"] as const;
+
+/**
+ * The adapter's own tool descriptions, used when the site's catalog gives none for a tool
+ * (its `toolText`, src/catalog.ts, at most MAX_TOOL_TEXT characters each).
+ */
+export const BUILT_IN_TEXT: Record<(typeof TOOL_NAMES)[number], string> = {
+  list_scenes:
+    "List the scenes you can render: each scene's id, device, collection, title, length (seconds), poster image and, when the site has them, the designer's notes. Filter by device or collection. The notes are suggestions.",
+  recording_spec:
+    "What to record for a device: the screen size in pixels, the frame rate, the accepted file types, the longest a screenshot can run and capture tips.",
+  suggest_sequence:
+    "Suggest plans for a goal (launch, app-demo, case-study or portfolio) on one device, from the designer's sequences, each resolved to real scenes of one collection with a reason. Optionally give an aspect, a film length and a collection.",
+  check_plan:
+    "Check a plan before rendering. Problems are rules the render enforces and must be fixed; warnings are the designer's taste, which you may go past when the person asks or has a reason. Each comes with a fix.",
+  render:
+    "Render a video from a plan, with the person's recording on the device screen, in their own Chrome. Free renders are watermarked previews for evaluation only; clean output needs Motion Mockups Pro. Files are saved in the project's motion-mockups folder. Any taste warning the plan goes past is listed under overrides.",
+  still:
+    "Render one frame of a plan as a PNG or JPEG: the frame at `seconds` from the film's start. Free stills are watermarked previews for evaluation only; clean output needs Motion Mockups Pro.",
+  account:
+    "Whether this adapter is connected to a Motion Mockups account, and whether its renders are Pro (clean) or free (watermarked previews).",
+  connect_account:
+    "Connect the person's Motion Mockups account, for clean Pro renders. Gives a link and code to show the person (open: true, recommended, also opens it); then call again with wait: true until they approve. disconnect: true revokes and deletes the saved connection.",
+};
 
 /** An error the SDK gives as a tool result, as a problem with a way out. */
 export function sdkProblem(message: string): Problem {
@@ -264,7 +260,19 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   // Nothing reaches stderr with an agent token in it either.
   const log = (line: string) => deps.log(redact(line));
   const catalog = catalogSource(deps.origin, deps.fetch, CATALOG_TIMEOUT_MS);
-  const instructions = serverInstructions(await catalog.get(), log);
+  // What the adapter left out of the site's guidance, said once per start.
+  let noted = false;
+  const note = (c: AgentCatalog) => {
+    if (noted) return;
+    noted = true;
+    for (const line of c.ignored ?? []) log(`motionmockups: ${line}`);
+  };
+  const first = await catalog.get();
+  if (first.ok) note(first.value);
+  const instructions = serverInstructions(first, log);
+  // Tool descriptions from the site when it gives them (fetched before the tools register);
+  // the built-in text otherwise, or when the catalog could not be read at start.
+  const describe = (tool: (typeof TOOL_NAMES)[number]) => (first.ok ? first.value.toolText?.[tool] : undefined) ?? BUILT_IN_TEXT[tool];
   const flows = connectFlows({ origin: deps.origin, data: deps.data, fetch: deps.fetch, timeScale: deps.connectTimeScale });
   /** The saved connection and its status; a cancel while asking is a `cancelled` refusal. */
   const account = (signal: AbortSignal): Promise<Checked<Account>> =>
@@ -386,7 +394,11 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
         });
         result = result.saved ? { ok: false, problems, saved: result.saved } : { ok: false, problems };
       }
-      return result.ok ? answer({ ...result.value }) : refused(result.problems, result.saved);
+      if (!result.ok) return refused(result.problems, result.saved);
+      // Taste never refuses a render: the warnings the plan went past are listed with it.
+      const known = await catalog.get();
+      const overrides = known.ok ? overridesOf(tasteWarnings(request.plan as Plan, known.value)) : [];
+      return answer({ ...result.value, ...(overrides.length ? { overrides } : {}) });
     })();
     const entry = { controller, done: work.catch(() => {}) };
     running.add(entry);
@@ -401,7 +413,9 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   /** Runs `use` with the catalog, or refuses with the reason it could not be read. */
   const withCatalog = async (use: (c: AgentCatalog) => CallToolResult): Promise<CallToolResult> => {
     const result = await catalog.get();
-    return result.ok ? use(result.value) : refused(result.problems);
+    if (!result.ok) return refused(result.problems);
+    note(result.value);
+    return use(result.value);
   };
 
   const deviceProblem = (c: AgentCatalog, device: string): Problem => ({
@@ -416,8 +430,7 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   server.registerTool(
     "list_scenes",
     {
-      description:
-        "List the scenes you can render: each scene's id, device, collection, title, length (seconds) and poster image. Filter by device or collection.",
+      description: describe("list_scenes"),
       inputSchema: listScenesInput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -444,15 +457,14 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
           }
           scenes = kept;
         }
-        return answer({ scenes });
+        return answer(scenesWithNotes(scenes, c));
       }),
   );
 
   server.registerTool(
     "recording_spec",
     {
-      description:
-        "What to record for a device: the screen size in pixels, the frame rate, the accepted file types, the longest a screenshot can run and capture tips.",
+      description: describe("recording_spec"),
       inputSchema: recordingSpecInput,
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
@@ -472,10 +484,33 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   );
 
   server.registerTool(
+    "suggest_sequence",
+    {
+      description: describe("suggest_sequence"),
+      inputSchema: suggestInput,
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    (input) =>
+      withCatalog((c) => {
+        const suggested = suggest(input, c);
+        return suggested.ok ? answer({ ...suggested.value }) : refused(suggested.problems);
+      }),
+  );
+
+  server.registerTool(
+    "check_plan",
+    {
+      description: describe("check_plan"),
+      inputSchema: checkInput,
+      annotations: { readOnlyHint: true, openWorldHint: true },
+    },
+    ({ plan }) => withCatalog((c) => answer({ ...checkPlan(plan, c) })),
+  );
+
+  server.registerTool(
     "render",
     {
-      description:
-        "Render a video from a plan, with the person's recording on the device screen, in their own Chrome. Free renders are watermarked previews for evaluation only; clean output needs Motion Mockups Pro. Files are saved in the project's motion-mockups folder.",
+      description: describe("render"),
       inputSchema: renderInput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -489,8 +524,7 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   server.registerTool(
     "still",
     {
-      description:
-        "Render one frame of a plan as a PNG or JPEG: the frame at `seconds` from the film's start. Free stills are watermarked previews for evaluation only; clean output needs Motion Mockups Pro.",
+      description: describe("still"),
       inputSchema: stillInput,
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
     },
@@ -509,8 +543,7 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   server.registerTool(
     "account",
     {
-      description:
-        "Whether this adapter is connected to a Motion Mockups account, and whether its renders are Pro (clean) or free (watermarked previews).",
+      description: describe("account"),
       inputSchema: accountInput,
       // Not read-only: the site's own 401 deletes the saved token (src/connect.ts currentAccount).
       annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
@@ -525,8 +558,7 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   server.registerTool(
     "connect_account",
     {
-      description:
-        "Connect the person's Motion Mockups account, for clean Pro renders. Gives a link and code to show the person (open: true, recommended, also opens it); then call again with wait: true until they approve. disconnect: true revokes and deletes the saved connection.",
+      description: describe("connect_account"),
       inputSchema: connectInput,
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true },
     },

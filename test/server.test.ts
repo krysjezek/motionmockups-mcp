@@ -12,10 +12,11 @@ import { ListRootsRequestSchema, type JSONRPCMessage } from "@modelcontextprotoc
 
 import { FALLBACK_BRIEFING, MAX_BRIEFING_CHARS, checkCatalog, type AgentCatalog } from "../src/catalog.ts";
 import type { Launcher } from "../src/connect.ts";
-import { createServer, sdkProblem, settingsFromEnv, type ServerDeps } from "../src/server.ts";
+import { BUILT_IN_TEXT, createServer, sdkProblem, settingsFromEnv, type ServerDeps } from "../src/server.ts";
 import type { Rendered, RenderRequest, SessionContext } from "../src/session.ts";
 import { TOKEN_FILE, writeToken } from "../src/token.ts";
 import { agentSite, approved, denied, pending, statusFor, TOKEN, unavailable, USER_CODE, type SiteOptions } from "./fixtures/agent-site.ts";
+import { GUIDED, oldCatalog } from "./fixtures/guided-catalog.ts";
 
 const ORIGIN = new URL("http://127.0.0.1:4173");
 const NOTICE = "Watermarked preview for evaluation only. Publishing it needs Motion Mockups Pro (https://motionmockups.com/pricing).";
@@ -172,10 +173,23 @@ test("a briefing longer than 8,000 characters is not passed on: the fallback is 
   assert.equal(scenes.scenes.length, 3);
 });
 
-test("the tools are the six documented ones", async (t) => {
+test("the tools are the eight documented ones", async (t) => {
   const { client } = await start(t);
   const { tools } = await client.listTools();
-  assert.deepEqual(tools.map((tool) => tool.name).sort(), ["account", "connect_account", "list_scenes", "recording_spec", "render", "still"]);
+  assert.deepEqual(tools.map((tool) => tool.name).sort(), [
+    "account",
+    "check_plan",
+    "connect_account",
+    "list_scenes",
+    "recording_spec",
+    "render",
+    "still",
+    "suggest_sequence",
+  ]);
+  // Without the site's text, each tool has the adapter's own.
+  for (const tool of tools) assert.equal(tool.description, BUILT_IN_TEXT[tool.name as keyof typeof BUILT_IN_TEXT], tool.name);
+  for (const name of ["check_plan", "suggest_sequence"])
+    assert.equal(tools.find((tool) => tool.name === name)!.annotations?.readOnlyHint, true, `${name} only reads`);
   for (const tool of tools) {
     assert.ok(tool.description && tool.description.length < 400, `${tool.name} has a short description`);
     assert.equal((tool.inputSchema as any).additionalProperties, false, `${tool.name} accepts only its own fields`);
@@ -592,7 +606,7 @@ test("an unknown tool names the tools there are; other SDK errors are the adapte
   const [problem] = structured(result).problems;
   assert.equal(problem.code, "tool");
   assert.match(problem.message, /make_video/);
-  assert.equal(problem.fix, "Use one of: list_scenes, recording_spec, render, still, account, connect_account.");
+  assert.equal(problem.fix, "Use one of: list_scenes, recording_spec, suggest_sequence, check_plan, render, still, account, connect_account.");
 
   assert.equal(sdkProblem("MCP error -32602: Tool render disabled").code, "tool");
   assert.equal(sdkProblem("MCP error -32602: Input validation error: Invalid arguments for tool render: x").code, "input");
@@ -1003,4 +1017,144 @@ test("connect_account disconnect: a network failure still deletes the file and s
   assert.equal(site.seen.filter((s) => s.path === "/api/agent/disconnect").length, 1);
   assert.equal(fs.existsSync(path.join(data, TOKEN_FILE)), false);
   assert.doesNotMatch(JSON.stringify(result), /mma_/);
+});
+
+// ---- Guidance: suggest_sequence, check_plan, notes and overrides ----
+
+const guided = (t: TestContext, catalog: unknown = GUIDED, options: Parameters<typeof start>[1] = {}) =>
+  start(t, { fetch: catalogFetch(() => jsonResponse(catalog)).fn, ...options });
+
+const DISPLAY_PLAN = (clips: { scene: string; seconds?: number }[]) => ({ contract: 1, device: "Display", aspect: "16:9", clips });
+
+test("tool descriptions come from the site's toolText when present, the built-in text otherwise", async (t) => {
+  const logged: string[] = [];
+  const value = structuredClone(GUIDED) as any;
+  value.toolText.render = "r".repeat(2_001);
+  const { client } = await guided(t, value, { log: (l) => logged.push(l) });
+  const { tools } = await client.listTools();
+  const text = Object.fromEntries(tools.map((tool) => [tool.name, tool.description]));
+  assert.equal(text.list_scenes, "Site text for list_scenes.");
+  assert.equal(text.check_plan, "Site text for check_plan.");
+  assert.equal(text.suggest_sequence, BUILT_IN_TEXT.suggest_sequence);
+  // Over the cap: the built-in text, and one line on stderr saying why.
+  assert.equal(text.render, BUILT_IN_TEXT.render);
+  assert.deepEqual(logged, ["motionmockups: the site's description of render is 2001 characters, more than 2000; the built-in one is used."]);
+  // The notes are not instructions: the briefing alone is.
+  assert.equal(client.getInstructions(), GUIDED.briefing);
+});
+
+test("list_scenes returns each scene's notes and the listed moves' and collections' notes once", async (t) => {
+  const { client } = await guided(t);
+  const phone = structured(await client.callTool({ name: "list_scenes", arguments: { device: "iPhone" } }));
+  assert.deepEqual(phone.scenes[0], GUIDED.scenes.find((s) => s.id === "showroom-iphone-shot-1"));
+  assert.deepEqual(Object.keys(phone.moves).sort(), ["Orbit", "Overhead", "Push In", "Square Up"]);
+  assert.deepEqual(phone.moves["Square Up"], GUIDED.moves["Square Up"]);
+  assert.deepEqual(phone.collectionNotes, { Loft: GUIDED.collectionNotes.Loft, Meadow: GUIDED.collectionNotes.Meadow });
+  const meadow = structured(await client.callTool({ name: "list_scenes", arguments: { collection: "Meadow" } }));
+  assert.deepEqual(Object.keys(meadow.collectionNotes), ["Meadow"]);
+  assert.ok(!("Low Arc" in meadow.moves), "only the moves of the scenes listed");
+});
+
+test("suggest_sequence answers plans from the site's recipes; an older site has none", async (t) => {
+  const { client } = await guided(t);
+  const result = await client.callTool({ name: "suggest_sequence", arguments: { goal: "launch", device: "Display", collection: "Loft" } });
+  assert.notEqual(result.isError, true, JSON.stringify(structured(result)));
+  const [only, ...rest] = structured(result).suggestions;
+  assert.equal(rest.length, 0);
+  assert.equal(only.collection, "Loft");
+  assert.equal(only.title, "Push in, circle, low finish");
+  assert.deepEqual(only.plan.clips, [
+    { scene: "showroom-xdr-shot-1", seconds: 4 },
+    { scene: "showroom-xdr-shot-3", seconds: 3 },
+    { scene: "showroom-xdr-shot-2", seconds: 3 },
+  ]);
+  const goal = await client.callTool({ name: "suggest_sequence", arguments: { goal: "wedding", device: "Display" } });
+  assert.equal(goal.isError, true);
+  assert.equal(structured(goal).problems[0].code, "goal");
+  const strict = await client.callTool({ name: "suggest_sequence", arguments: { goal: "launch", device: "Display", mood: "warm" } });
+  assert.equal(strict.isError, true);
+  assert.equal(structured(strict).problems[0].code, "input");
+
+  const { client: old } = await guided(t, oldCatalog());
+  const none = await old.callTool({ name: "suggest_sequence", arguments: { goal: "launch", device: "Display" } });
+  assert.notEqual(none.isError, true);
+  assert.deepEqual(structured(none).suggestions, []);
+});
+
+test("check_plan: problems the render would refuse, warnings of taste, and the shape refused like render's", async (t) => {
+  const { client, calls } = await guided(t);
+  const check = async (plan: unknown) => client.callTool({ name: "check_plan", arguments: { plan } as any });
+  const good = structured(await check(DISPLAY_PLAN([{ scene: "showroom-xdr-shot-1", seconds: 4 }, { scene: "showroom-xdr-shot-2", seconds: 4 }])));
+  assert.deepEqual(good, { ok: true, problems: [], warnings: [] });
+  const bad = await check(DISPLAY_PLAN([{ scene: "showroom-xdr-shot-3", seconds: 4 }, { scene: "showroom-iphone-shot-1" }]));
+  assert.notEqual(bad.isError, true, "a check that finds problems is still an answer");
+  assert.equal(structured(bad).ok, false);
+  assert.deepEqual(structured(bad).problems.map((p: any) => p.code), ["scene"]);
+  assert.deepEqual(structured(bad).warnings.map((w: any) => w.code), ["openers"]);
+  for (const w of structured(bad).warnings) assert.ok(w.message && w.fix);
+  const shape = await check({ ...DISPLAY_PLAN([{ scene: "showroom-xdr-shot-1" }]), fps: 30 });
+  assert.equal(shape.isError, true);
+  assert.equal(structured(shape).problems[0].code, "input");
+  assert.equal(calls.length, 0, "check_plan renders nothing");
+});
+
+test("render and still go past taste warnings and list them under overrides; a quiet plan has none", async (t) => {
+  const project = temp(t, "mm-proj-");
+  const { client, calls } = await guided(t, GUIDED, { env: { MOTIONMOCKUPS_FOLDERS: project } });
+  // Opens on Orbit, ends on Orbit: two taste warnings, rendered anyway.
+  const plan = DISPLAY_PLAN([{ scene: "showroom-xdr-shot-3", seconds: 4 }, { scene: "showroom-xdr-shot-1", seconds: 4 }, { scene: "showroom-xdr-shot-6", seconds: 4 }]);
+  const result = await client.callTool({ name: "render", arguments: { plan } });
+  assert.notEqual(result.isError, true, JSON.stringify(structured(result)));
+  assert.equal(calls.length, 1, "taste never refuses");
+  assert.deepEqual(calls[0]!.request.plan, plan, "the plan reaches the page unchanged");
+  const { overrides } = structured(result);
+  assert.deepEqual(overrides, [
+    "openers: The film opens on Orbit (showroom-xdr-shot-3), which the designer does not use to open.",
+    "closers: The film ends on Orbit (showroom-xdr-shot-6), which the designer does not use to close.",
+  ]);
+  assert.equal(structured(result).files.length, 1);
+  const still = await client.callTool({ name: "still", arguments: { plan, seconds: 1, format: "png" } });
+  assert.deepEqual(structured(still).overrides, overrides);
+  const quiet = await client.callTool({
+    name: "render",
+    arguments: { plan: DISPLAY_PLAN([{ scene: "showroom-xdr-shot-1", seconds: 4 }, { scene: "showroom-xdr-shot-2", seconds: 4 }]) },
+  });
+  assert.equal("overrides" in structured(quiet), false);
+});
+
+test("a render the page refuses lists no overrides", async (t) => {
+  const problems = [{ code: "scene", message: '"x" is not a scene.', fix: "Take scene ids from the catalog." }];
+  const { client } = await guided(t, GUIDED, { renderOnce: async () => ({ ok: false, problems }) });
+  const result = await client.callTool({ name: "render", arguments: { plan: DISPLAY_PLAN([{ scene: "showroom-xdr-shot-3" }]) } });
+  assert.equal(result.isError, true);
+  assert.deepEqual(structured(result), { problems });
+});
+
+test("an unknown taste rule is ignored with one stderr line per start, and the tools keep working", async (t) => {
+  const logged: string[] = [];
+  const value = structuredClone(GUIDED) as any;
+  value.taste.noBlueScreens = true;
+  value.newField = { anything: [1, 2, 3] };
+  const { client } = await guided(t, value, { log: (l) => logged.push(l) });
+  for (let i = 0; i < 3; i++) await client.callTool({ name: "list_scenes", arguments: {} });
+  const check = structured(
+    await client.callTool({ name: "check_plan", arguments: { plan: DISPLAY_PLAN([{ scene: "showroom-xdr-shot-3", seconds: 4 }, { scene: "showroom-xdr-shot-2", seconds: 4 }]) } }),
+  );
+  assert.deepEqual(check.warnings.map((w: any) => w.code), ["openers"]);
+  assert.deepEqual(logged, ['motionmockups: the site\'s taste rule "noBlueScreens" is not one this adapter knows; it is ignored.']);
+});
+
+test("a catalog first read after start is noted once too", async (t) => {
+  const logged: string[] = [];
+  const value = structuredClone(GUIDED) as any;
+  value.taste.noBlueScreens = true;
+  let up = false;
+  const { client } = await start(t, {
+    fetch: catalogFetch(() => (up ? jsonResponse(value) : new Response("down", { status: 503 }))).fn,
+    log: (l) => logged.push(l),
+  });
+  up = true;
+  await client.callTool({ name: "list_scenes", arguments: {} });
+  await client.callTool({ name: "list_scenes", arguments: {} });
+  assert.equal(logged.filter((l) => /noBlueScreens/.test(l)).length, 1);
 });

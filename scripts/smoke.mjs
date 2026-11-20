@@ -1,6 +1,6 @@
 // A smoke test of the built bundle as a real MCP server over stdio: copied alone into a
 // temporary folder (so it can resolve no package), pointed at a closed local port, it must
-// start with the built-in briefing, list its six tools, answer list_scenes and connect_account with
+// start with the built-in briefing, list its eight tools, answer list_scenes and connect_account with
 // code "site", write nothing but MCP messages to stdout and exit on its own when the client
 // closes stdin. Run after `npm run build`: `node scripts/smoke.mjs`.
 
@@ -48,7 +48,7 @@ try {
   assert.match(client.getInstructions() ?? "", /could not be loaded/);
   const { tools } = await client.listTools();
   results.tools = tools.map((t) => t.name).sort();
-  assert.deepEqual(results.tools, ["account", "connect_account", "list_scenes", "recording_spec", "render", "still"]);
+  assert.deepEqual(results.tools, ["account", "check_plan", "connect_account", "list_scenes", "recording_spec", "render", "still", "suggest_sequence"]);
   const listed = await client.callTool({ name: "list_scenes", arguments: {} });
   assert.equal(listed.isError, true);
   results.listScenes = listed.structuredContent.problems[0];

@@ -31,12 +31,52 @@ It needs Node.js 20 or later and Google Chrome (Chromium on Linux).
 
 | Tool | What it does |
 |---|---|
-| `list_scenes` | The scenes you can render, by device or collection: id, title, length and poster. |
+| `list_scenes` | The scenes you can render, by device or collection: id, title, length, poster and the designer's notes. |
 | `recording_spec` | What to record for a device: screen size, frame rate, file types. |
-| `render` | Renders a plan into a video, with the recording on the device screen. |
-| `still` | Renders one frame of a plan as a PNG or JPEG. |
+| `suggest_sequence` | Plans for a goal (launch, app demo, case study or portfolio) on one device, from the designer's sequences, each with its reason. |
+| `check_plan` | Checks a plan before a render: the problems the render would refuse, and the designer's taste as warnings. |
+| `render` | Renders a plan into a video, with the recording on the device screen. Lists any taste warning it went past under `overrides`. |
+| `still` | Renders one frame of a plan as a PNG or JPEG, with `overrides` as `render`. |
 | `account` | Whether the adapter is connected to a Motion Mockups account, and whether its renders are Pro (clean) or free (watermarked previews). |
 | `connect_account` | Connects your account, so renders are clean with Pro. See [Connect your account](#connect-your-account). |
+
+The tool descriptions, the scene notes, the sequences and the taste rules'
+values come from the site, so they change when the site does. A site that
+serves none of them still works: the tools use their own descriptions and
+give no notes, suggestions or warnings.
+
+## The designer's guidance
+
+One designer directs every scene. The site serves that guidance with the
+scene list, and the adapter passes it on as data in tool results:
+
+- **Notes.** `list_scenes` gives each scene's notes (its move, framing, pace,
+  how much of the screen reads and what it is good as: opener, detail or
+  close), and once for all the scenes listed, each move's notes (what it cuts
+  well with and what to keep apart) and each collection's (its light and
+  setting).
+- **Sequences.** `suggest_sequence` takes a goal and a device, and optionally
+  an aspect, a length in seconds and a collection. It answers with up to six
+  plans, each from one collection's real scenes, with a title and why. A
+  sequence the designer framed for another aspect than the one asked keeps
+  its own, after those in the asked aspect, with a note on changing it.
+- **Checks.** `check_plan` returns `{ ok, problems, warnings }`. Problems
+  preview what the render page refuses: a scene that does not exist or is
+  another device's, an aspect or size it does not offer, or a clip shorter
+  than a second or longer than its scene (shorter still under a speed ramp).
+  Fix those; the page stays the judge. Warnings are taste: a film outside the
+  designer's length (6 to 20 seconds today), more clips than the designer's
+  limit (six today), two collections, the same move twice in a
+  row, a pair of moves the designer keeps apart, an opening or closing scene
+  the designer does not use for that, or a scene the designer keeps out of
+  films. Each has a `code` and a `fix`.
+- **Overrides.** Taste never stops a render. When a plan goes past a warning,
+  the `render` or `still` result lists it, as `overrides: ["<code>: <what>"]`.
+
+The notes are suggestions, and those marked `reviewed: false` are drafts.
+Only the site's briefing becomes the agent's instructions (at most 8,000
+characters); every note, sequence and description is capped in length, and a
+taste rule this adapter does not know is ignored with one line on stderr.
 
 ## Settings
 
