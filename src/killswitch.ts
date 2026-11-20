@@ -111,8 +111,16 @@ export function checkAdapters(value: unknown): Adapters | string {
   return {
     ...(allowed !== undefined ? { allowed: allowed as string } : {}),
     blocked: blocked as string[],
-    message: message.length > MESSAGE_CHARS ? `${message.slice(0, MESSAGE_CHARS - 1)}…` : message,
+    message: capMessage(message),
   };
+}
+
+/** At most MESSAGE_CHARS, ending in an ellipsis when cut, never half of a surrogate pair. */
+function capMessage(message: string): string {
+  if (message.length <= MESSAGE_CHARS) return message;
+  let kept = message.slice(0, MESSAGE_CHARS - 1);
+  if (/[\uD800-\uDBFF]$/.test(kept)) kept = kept.slice(0, -1);
+  return `${kept}…`;
 }
 
 /** The refusal for this adapter's `version`, or undefined when it may serve. */

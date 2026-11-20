@@ -77,6 +77,12 @@ export interface SessionContext {
    * environment, in a URL or in a result. Without it, the render is a free preview.
    */
   pro?: { accessToken: string };
+  /**
+   * Asked once the render lock is held, before Chrome starts: the refusal when the render may
+   * no longer run (the site blocked this adapter while it waited, src/killswitch.ts), else
+   * undefined. A render that has started is never stopped by it.
+   */
+  stillAllowed?: () => Promise<Problem | undefined>;
 }
 
 export const FREE_NOTICE =
@@ -478,6 +484,17 @@ export async function renderOnce(request: RenderRequest, context: SessionContext
     });
   } catch (error) {
     return refusal(asProblem(error));
+  }
+  // The wait may have been long: a block the site set meanwhile refuses before anything starts.
+  let blocked: Problem | undefined;
+  try {
+    blocked = await context.stillAllowed?.();
+  } catch {
+    // A check that fails blocks nothing, like a catalog that cannot be read.
+  }
+  if (blocked) {
+    await held.release();
+    return refusal(blocked);
   }
 
   const stop = stopSignal({ signal: context.signal, timeoutMs: context.timeoutMs, lost: held.lost });

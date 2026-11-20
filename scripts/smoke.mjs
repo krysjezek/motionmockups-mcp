@@ -5,7 +5,7 @@
 // closes stdin. Run after `npm run build`: `node scripts/smoke.mjs`.
 
 import assert from "node:assert/strict";
-import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
+import { copyFileSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -44,6 +44,11 @@ try {
   const started = performance.now();
   await client.connect(transport);
   results.startMs = Math.round(performance.now() - started);
+  // The published bundle carries package.json's version, never the unbuilt "dev" the kill
+  // switch skips (src/version.ts).
+  results.version = client.getServerVersion()?.version;
+  assert.notEqual(results.version, "dev");
+  assert.equal(results.version, JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version);
   const pid = transport.pid;
   assert.match(client.getInstructions() ?? "", /could not be loaded/);
   const { tools } = await client.listTools();

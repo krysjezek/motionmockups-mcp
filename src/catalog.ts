@@ -5,7 +5,7 @@
 // A good one is kept for 10 minutes, then read again by the next call that needs it, so a
 // kill switch the site sets (its `adapters` block, src/killswitch.ts) takes effect within
 // minutes. A failed fetch is tried again on the next call; a failed re-read keeps the last
-// good catalog.
+// good catalog for another minute before trying again.
 
 import { DEFAULT_ORIGIN } from "./origin.ts";
 import type { Checked, Problem } from "./folders.ts";
@@ -420,11 +420,13 @@ export async function fetchCatalog(origin: URL, fetchImpl: typeof fetch, timeout
 
 /** How long a good catalog is used before the next call reads it again. */
 export const CATALOG_MAX_AGE_MS = 10 * 60_000;
+/** After a failed re-read, how long the last good catalog serves before the next try. */
+export const CATALOG_RETRY_MS = 60_000;
 
 /**
  * The catalog for a server: `get()` gives the one kept while it is younger than
  * CATALOG_MAX_AGE_MS on `now`, or fetches again. Calls made while a fetch runs share it. A
- * re-read that fails gives the last good catalog, and the next call tries again.
+ * re-read that fails gives the last good catalog, and is tried again CATALOG_RETRY_MS later.
  */
 export function catalogSource(origin: URL, fetchImpl: typeof fetch, timeoutMs = CATALOG_TIMEOUT_MS, now: () => number = Date.now) {
   let good: { value: AgentCatalog; at: number } | undefined;
@@ -435,7 +437,11 @@ export function catalogSource(origin: URL, fetchImpl: typeof fetch, timeoutMs = 
       running ??= fetchCatalog(origin, fetchImpl, timeoutMs)
         .then((result): Checked<AgentCatalog> => {
           if (result.ok) good = { value: result.value, at: now() };
-          else if (good) return { ok: true, value: good.value };
+          else if (good) {
+            // Offline calls are not each held up by the fetch timeout: the next try is a minute on.
+            good.at = now() - CATALOG_MAX_AGE_MS + CATALOG_RETRY_MS;
+            return { ok: true, value: good.value };
+          }
           return result;
         })
         .finally(() => (running = undefined));

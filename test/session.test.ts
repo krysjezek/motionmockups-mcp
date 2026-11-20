@@ -230,6 +230,43 @@ test("waiting for another render reports the wait, and cancelling the wait gives
   assert.equal(fs.existsSync(path.join(data, "chrome-profile")), false, "Chrome waited for the lock");
 });
 
+test(
+  "a render that waited for the lock asks again whether it may run: blocked meanwhile, it releases the lock and refuses",
+  { skip: found.ok ? false : "no Google Chrome on this machine" },
+  async (t) => {
+    const project = temp(t, "mm-session-project-");
+    const data = temp(t, "mm-session-data-");
+    const other = await acquireRenderLock(data);
+    let releasing: Promise<void> | undefined;
+    t.after(() => releasing ?? other.release());
+    const blocked = { code: "blocked", message: "Blocked by the site.", fix: "Update." };
+    let asked = 0;
+    const result = await renderOnce(
+      { plan: PLAN },
+      context({
+        // A closed port: if the session went on, it would fail with site, never blocked.
+        origin: new URL("http://127.0.0.1:9"),
+        allowed: [project],
+        data,
+        onProgress: (p) => {
+          if (p.phase === "waiting") releasing ??= other.release();
+        },
+        stillAllowed: async () => {
+          asked++;
+          return blocked;
+        },
+      }),
+    );
+    assert.deepEqual(result, { ok: false, problems: [blocked] });
+    assert.equal(asked, 1, "asked once, after the lock");
+    assert.equal(fs.existsSync(path.join(data, LOCK_NAME)), false, "the lock was released");
+    assert.equal(fs.existsSync(path.join(data, "chrome-profile")), false, "Chrome never started");
+    // The lock is free for the next render.
+    const next = await acquireRenderLock(data);
+    await next.release();
+  },
+);
+
 // ---- what a killed adapter left in staging ----
 
 const GUID_A = "0f8fad5b-d9cb-469f-a165-70867728950e";

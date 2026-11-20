@@ -391,6 +391,8 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
           signal: controller.signal,
           timeoutMs: deps.timeoutMs,
           onProgress,
+          // Asked again once the render lock is held: a render that waited its turn may since have been blocked.
+          stillAllowed: blockedNow,
           ...(proToken ? { pro: { accessToken: proToken } } : {}),
         });
       } catch (error) {

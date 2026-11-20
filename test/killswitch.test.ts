@@ -9,7 +9,7 @@ import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
-import { CATALOG_MAX_AGE_MS, checkCatalog } from "../src/catalog.ts";
+import { CATALOG_MAX_AGE_MS, CATALOG_RETRY_MS, checkCatalog } from "../src/catalog.ts";
 import { blockedProblem, checkAdapters, compareVersions, MESSAGE_CHARS, parseRange, satisfies, UPGRADE_FIX } from "../src/killswitch.ts";
 import { createServer, type ServerDeps } from "../src/server.ts";
 import type { Rendered } from "../src/session.ts";
@@ -90,6 +90,11 @@ test("the adapters block: well formed, it is kept with the message capped", () =
   assert.equal(typeof long, "object");
   assert.equal((long as any).message.length, MESSAGE_CHARS);
   assert.equal(MESSAGE_CHARS, 500);
+  // A cut never leaves half of a two-unit (UTF-16 surrogate pair) character before the ellipsis.
+  const emoji = (checkAdapters({ message: `${"a".repeat(MESSAGE_CHARS - 2)}\u{1F6AB}${"b".repeat(10)}` }) as any).message as string;
+  assert.ok(emoji.length <= MESSAGE_CHARS);
+  assert.doesNotMatch(emoji, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/, "no lone high surrogate");
+  assert.equal(emoji, `${"a".repeat(MESSAGE_CHARS - 2)}…`);
 });
 
 test("the adapters block: a malformed one is a reason, never a block", () => {
@@ -313,6 +318,51 @@ test("a block arriving mid-render: the running render finishes, the next call is
   assertBlocked(await call("render", { plan: PLAN }), "the next render");
   assertBlocked(await call("still", { plan: PLAN, seconds: 1, format: "png" }), "the next still");
   assert.equal(renders.length, 1);
+});
+
+test("a render waiting its turn when a block arrives is refused when its turn comes", async (t) => {
+  let served: unknown = CATALOG;
+  let started!: () => void;
+  const waiting = new Promise<void>((resolve) => (started = resolve));
+  let turn!: () => void;
+  const lockFree = new Promise<void>((resolve) => (turn = resolve));
+  const { call, clock } = await start(t, {
+    serve: () => served,
+    // As the session does: wait for the lock, then ask whether the render may still run.
+    renderOnce: async (_request, context) => {
+      started();
+      await lockFree;
+      const blocked = await context.stillAllowed?.();
+      return blocked ? { ok: false, problems: [blocked] } : DELIVERED;
+    },
+  });
+  const waited = call("render", { plan: PLAN });
+  await waiting;
+  served = with_(BLOCKING);
+  clock.now += CATALOG_MAX_AGE_MS;
+  turn();
+  assertBlocked(await waited, "the render that waited");
+});
+
+test("a failed re-read is tried again after a minute, not on every call", async (t) => {
+  let up = true;
+  const { call, clock, fetches } = await start(t, {
+    serve: () => {
+      if (!up) throw new TypeError("fetch failed");
+      return CATALOG;
+    },
+  });
+  up = false;
+  clock.now += CATALOG_MAX_AGE_MS;
+  for (let i = 0; i < 20; i++) assert.notEqual((await call("list_scenes")).isError, true, "the last good catalog serves");
+  assert.equal(fetches.length, 2, "one failed re-read for 20 calls");
+  clock.now += CATALOG_RETRY_MS - 1;
+  await call("list_scenes");
+  assert.equal(fetches.length, 2);
+  clock.now += 1;
+  await call("list_scenes");
+  assert.equal(fetches.length, 3, "tried again a minute later");
+  assert.equal(CATALOG_RETRY_MS, 60_000);
 });
 
 test("a malformed adapters block never locks anyone out, and is noted once on stderr", async (t) => {

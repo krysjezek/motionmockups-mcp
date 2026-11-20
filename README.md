@@ -268,8 +268,10 @@ descriptions stay as they were; only the results refuse.
 
 The adapter reads the scene list at start and again on the first call after
 it is 10 minutes old, so a block takes effect within minutes. A render that
-had already started finishes; the next call is refused. If the list cannot
-be read again, the last one read stays in force.
+had already started finishes; the next call is refused, and so is a render
+still waiting for another render to finish, once its turn comes. If the list cannot
+be read again, the last one read stays in force, and it is tried again a
+minute later.
 
 The block can never shut everyone out by mistake: a site without an
 `adapters` block allows every version, and a block the adapter cannot read
@@ -286,6 +288,8 @@ built, has the version `dev` and is never checked.
   `^1.2.3` is `>=1.2.3 <2.0.0-0`, `^0.2.3` is `>=0.2.3 <0.3.0-0`;
 - a version may carry a prerelease (`0.2.0-beta.1`), which is lower than
   its release, and build metadata (`+…`), which is not compared.
+  Prereleases are compared as npm does with `includePrerelease`, unlike
+  npm's default: `>=0.1.0` admits `0.2.0-beta.1`.
 
 Not read: `~`, `x` and `*`, `||`, hyphen ranges and a space between an
 operator and its version. Each entry in `blocked` is one exact version.
