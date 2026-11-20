@@ -89,6 +89,7 @@ async function start(
     data?: string;
     openBrowser?: Launcher;
     tasteOverrides?: ServerDeps["tasteOverrides"];
+    folders?: string[];
   } = {},
 ): Promise<Started> {
   const calls: Call[] = [];
@@ -110,6 +111,7 @@ async function start(
     connectTimeScale: 0.005,
     openBrowser: options.openBrowser ?? (() => assert.fail("a test opened a browser")),
     ...(options.tasteOverrides ? { tasteOverrides: options.tasteOverrides } : {}),
+    ...(options.folders ? { folders: options.folders } : {}),
   };
   const adapter = await createServer(deps);
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -296,6 +298,21 @@ test("render passes roots and env folders as allowed", async (t) => {
   assert.equal(context.chromeMode, "headless");
   assert.equal(context.timeoutMs, 20 * 60_000);
   assert.deepEqual(structured(result), { files: [{ path: "/p/motion-mockups/a.mp4", bytes: 10 }], warnings: [], notice: NOTICE });
+});
+
+test("render allows each folder given after mcp as one folder, never split, before MOTIONMOCKUPS_FOLDERS", async (t) => {
+  const base = temp(t, "mm-args-");
+  // A separator inside a folder's name (legal on each system) keeps it one folder.
+  const picked = path.join(base, `2026${path.delimiter}launch`);
+  fs.mkdirSync(picked);
+  const extra = temp(t, "mm-extra-");
+  const { client, calls } = await start(t, {
+    folders: [picked, "${user_config.allowed_folders}", "relative/folder", ""],
+    env: { MOTIONMOCKUPS_FOLDERS: extra },
+  });
+  const result = await client.callTool({ name: "render", arguments: { plan: PLAN } });
+  assert.notEqual(result.isError, true);
+  assert.deepEqual(calls[0]!.context.allowed, [picked, extra]);
 });
 
 test("roots are read again after roots/list_changed", async (t) => {

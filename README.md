@@ -96,7 +96,7 @@ taste rule this adapter does not know is ignored with one line on stderr.
 
 | Variable | What it does |
 |---|---|
-| `MOTIONMOCKUPS_FOLDERS` | More folders the adapter may use, besides the project folders your MCP client shares. Absolute paths, separated by `;` on Windows and `:` elsewhere. Folders given after `mcp` (`motionmockups mcp <folder> ...`, which the Claude Desktop extension uses) are added to them. |
+| `MOTIONMOCKUPS_FOLDERS` | More folders the adapter may use, besides the project folders your MCP client shares. Absolute paths, separated by `;` on Windows and `:` elsewhere. Folders given after `mcp` (`motionmockups mcp <folder> ...`, which the Claude Desktop extension uses) are allowed too, each as one folder, never split. |
 | `MOTIONMOCKUPS_CHROME` | The Chrome to use, when it is not installed in the usual place. A path that is wrong is refused, never passed over. |
 | `MOTIONMOCKUPS_CHROME_MODE` | `headless` (the default) or `window`. See [Chrome mode](#chrome-mode). |
 | `MOTIONMOCKUPS_TIMEOUT_MINUTES` | How long one render may run, 1 minute or more. By default 20. |

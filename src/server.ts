@@ -49,6 +49,8 @@ const STOP_MS = 30_000;
 export interface ServerDeps {
   origin: URL;
   env: NodeJS.ProcessEnv;
+  /** The folders given after `motionmockups mcp`, each allowed as one folder (src/folders.ts). */
+  folders?: string[];
   fetch: typeof fetch;
   renderOnce: (request: RenderRequest, context: SessionContext) => Promise<Rendered>;
   data: string;
@@ -323,7 +325,7 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
       if (!read.ok) return read;
       declared = read.value;
     }
-    return { ok: true, value: await allowedFolders(declared, deps.env) };
+    return { ok: true, value: await allowedFolders(declared, deps.env, deps.folders) };
   };
 
   // ---- Renders, each cancelled by its request or by stop() ----

@@ -91,6 +91,17 @@ test("a recording inside a root is readable", async (t) => {
   assert.deepEqual(result, { ok: true, value: { path: clip, kind: "video", bytes: MP4_HEADER.length + 100 } });
 });
 
+test("folders given on the command line: each is one folder; a placeholder, a relative path or an empty one is not allowed", async (t) => {
+  const { dir } = sandbox(t);
+  const picked = path.join(dir, `2026${path.delimiter}launch`);
+  fs.mkdirSync(picked);
+  assert.deepEqual(await allowedFolders([], {}, [picked]), [picked]);
+  for (const entry of ["${user_config.allowed_folders}", "relative/folder", "", "  "])
+    assert.deepEqual(await allowedFolders([], {}, [entry]), [], JSON.stringify(entry));
+  // Through MOTIONMOCKUPS_FOLDERS the same name is split in two, neither of which exists.
+  assert.deepEqual(await allowedFolders([], { MOTIONMOCKUPS_FOLDERS: picked }), []);
+});
+
 test("a path with a space and a non-ASCII letter is readable", async (t) => {
   const { dir } = sandbox(t);
   const root = path.join(dir, "My Recordings č");

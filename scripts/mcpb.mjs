@@ -1,6 +1,6 @@
 // Builds motionmockups.mcpb, the Claude Desktop extension: a zip of manifest.json (mcpb
 // manifest 0.3, github.com/anthropics/mcpb MANIFEST.md) and the one published bundle,
-// dist/motionmockups.js, at the path the manifest names. Nothing else goes in: no install
+// dist/motionmockups.js, as motionmockups.mjs, the path the manifest names. Nothing else goes in: no install
 // scripts, no node_modules, no icon. Run after `npm run build`:
 // `node scripts/mcpb.mjs [out.mcpb]` (motionmockups.mcpb at the repository root by default).
 //
@@ -15,6 +15,9 @@ import { transform } from "esbuild";
 
 const root = new URL("../", import.meta.url);
 export const BUNDLE = "dist/motionmockups.js";
+// The same bytes as an .mjs: with no package.json beside it, Node before 20.19 and 22.7
+// would run a .js as CommonJS and fail on its first import.
+export const ENTRY = "motionmockups.mjs";
 
 /** The tools' own descriptions (src/tools.ts), the text the server gives without the site. */
 async function builtInTools() {
@@ -43,13 +46,13 @@ export async function manifest() {
     keywords: pkg.keywords,
     server: {
       type: "node",
-      entry_point: BUNDLE,
+      entry_point: ENTRY,
       mcp_config: {
         command: "node",
         // A folder list expands only into arguments, one per folder (an array in an env
-        // string is left unreplaced by the host); the adapter adds the folders given after
-        // `mcp` to MOTIONMOCKUPS_FOLDERS (src/cli.ts).
-        args: [`\${__dirname}/${BUNDLE}`, "mcp", "${user_config.allowed_folders}"],
+        // string is left unreplaced by the host); the adapter allows each folder given after
+        // `mcp` as one folder, besides MOTIONMOCKUPS_FOLDERS (src/cli.ts, src/folders.ts).
+        args: [`\${__dirname}/${ENTRY}`, "mcp", "${user_config.allowed_folders}"],
         env: { MOTIONMOCKUPS_ORIGIN: "${user_config.origin}" },
       },
     },
@@ -156,7 +159,7 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const json = `${JSON.stringify(await manifest(), null, 2)}\n`;
   writeFileSync(out, zip([
     { name: "manifest.json", data: Buffer.from(json, "utf8") },
-    { name: BUNDLE, data: readFileSync(bundle) },
+    { name: ENTRY, data: readFileSync(bundle) },
   ]));
   console.log(`wrote ${out}`);
 }

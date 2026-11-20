@@ -134,12 +134,14 @@ async function realDirectory(p: string): Promise<string | null> {
 }
 
 /**
- * The folders the adapter may use: the MCP roots first, then `MOTIONMOCKUPS_FOLDERS`.
+ * The folders the adapter may use: the MCP roots first, then the folders given after
+ * `motionmockups mcp` (the Claude Desktop extension's, scripts/mcpb.mjs), then
+ * `MOTIONMOCKUPS_FOLDERS`. A folder given as an argument is one entry, never split.
  * Real paths of existing folders only, each once. Relative entries and whole drives
  * (`C:\`, `/`) are never allowed.
  */
-export async function allowedFolders(roots: string[], env: NodeJS.ProcessEnv = process.env): Promise<string[]> {
-  const entries = [...roots, ...(env.MOTIONMOCKUPS_FOLDERS ?? "").split(path.delimiter)];
+export async function allowedFolders(roots: string[], env: NodeJS.ProcessEnv = process.env, args: string[] = []): Promise<string[]> {
+  const entries = [...roots, ...args, ...(env.MOTIONMOCKUPS_FOLDERS ?? "").split(path.delimiter)];
   const out: string[] = [];
   const seen = new Set<string>();
   for (const entry of entries) {
@@ -155,15 +157,6 @@ export async function allowedFolders(roots: string[], env: NodeJS.ProcessEnv = p
     out.push(real);
   }
   return out;
-}
-
-/**
- * `MOTIONMOCKUPS_FOLDERS` with the folders given after `motionmockups mcp` added: the Claude
- * Desktop extension passes the folders the person picked as arguments, since its manifest can
- * expand a folder list only into arguments, never into one variable (scripts/mcpb.mjs).
- */
-export function foldersWithArgs(current: string | undefined, args: string[]): string {
-  return [current ?? "", ...args].filter((s) => s.trim()).join(path.delimiter);
 }
 
 function outsideFix(allowed: string[]): string {

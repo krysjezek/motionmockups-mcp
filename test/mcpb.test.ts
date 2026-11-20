@@ -1,22 +1,25 @@
 // The Claude Desktop extension (scripts/mcpb.mjs): built from the same bundle npm publishes,
 // it carries the manifest and that bundle only, at package.json's version, with the person's
-// folders and the origin passed as the adapter reads them, and nothing personal.
+// folders and the origin passed as the adapter reads them, and nothing personal. The built
+// bundle itself also leaves cleanly when its client closes stdin.
 
 import { after, before, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import { lookup } from "node:dns/promises";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { inflateRawSync } from "node:zlib";
-
-import { foldersWithArgs } from "../src/folders.ts";
 
 const repo = new URL("..", import.meta.url);
 const at = (file: string) => new URL(file, repo);
 const pkg = JSON.parse(fs.readFileSync(at("package.json"), "utf8"));
 const BUNDLE = "dist/motionmockups.js";
+// In the extension the bundle is an .mjs, so Node runs it as a module with no package.json
+// beside it (Node before 20.19 and 22.7 never detects that a .js is one).
+const ENTRY = "motionmockups.mjs";
 
 let folder: string;
 let mcpb: string;
@@ -61,8 +64,8 @@ before(() => {
 after(() => fs.rmSync(folder, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
 
 test("mcpb: exactly the manifest and the bundle, the bundle byte-equal to dist", () => {
-  assert.deepEqual([...entries.keys()], ["manifest.json", BUNDLE]);
-  assert.ok(entries.get(BUNDLE)!.equals(fs.readFileSync(at(BUNDLE))));
+  assert.deepEqual([...entries.keys()], ["manifest.json", ENTRY]);
+  assert.ok(entries.get(ENTRY)!.equals(fs.readFileSync(at(BUNDLE))));
 });
 
 test("mcpb: the manifest's version is package.json's, and it runs the bundle it carries with node", () => {
@@ -75,9 +78,9 @@ test("mcpb: the manifest's version is package.json's, and it runs the bundle it 
   assert.equal(manifest.repository.url, "https://github.com/krysjezek/motionmockups-mcp");
   assert.ok(manifest.description);
   assert.equal(manifest.server.type, "node");
-  assert.equal(manifest.server.entry_point, BUNDLE);
+  assert.equal(manifest.server.entry_point, ENTRY);
   assert.equal(manifest.server.mcp_config.command, "node");
-  assert.deepEqual(manifest.server.mcp_config.args.slice(0, 2), [`\${__dirname}/${BUNDLE}`, "mcp"]);
+  assert.deepEqual(manifest.server.mcp_config.args.slice(0, 2), [`\${__dirname}/${ENTRY}`, "mcp"]);
   assert.deepEqual(manifest.compatibility, { platforms: ["darwin", "win32", "linux"], runtimes: { node: pkg.engines.node } });
   assert.deepEqual(
     manifest.tools.map((t: { name: string }) => t.name),
@@ -117,10 +120,9 @@ test("mcpb: the allowed folders reach MOTIONMOCKUPS_FOLDERS and the origin MOTIO
 
   const a = path.resolve("/a b"), b = path.resolve("/c");
   const run = hosted({ allowed_folders: [a, b], origin: "http://localhost:4173" });
-  assert.deepEqual(run.args, [`/ext/${BUNDLE}`, "mcp", a, b]);
-  // src/cli.ts adds the arguments after `mcp` to MOTIONMOCKUPS_FOLDERS.
-  assert.equal(foldersWithArgs(undefined, run.args.slice(2)), `${a}${path.delimiter}${b}`);
-  assert.equal(foldersWithArgs(`/x`, [a]), `/x${path.delimiter}${a}`);
+  // src/cli.ts allows each argument after `mcp` as one folder, never split, besides
+  // MOTIONMOCKUPS_FOLDERS (test/server.test.ts, test/folders.test.ts).
+  assert.deepEqual(run.args, [`/ext/${ENTRY}`, "mcp", a, b]);
   assert.deepEqual(run.env, { MOTIONMOCKUPS_ORIGIN: "http://localhost:4173" });
   // Left empty, the origin is "", which the adapter reads as the public site.
   assert.deepEqual(hosted({ allowed_folders: [a] }).env, { MOTIONMOCKUPS_ORIGIN: "" });
@@ -148,7 +150,45 @@ test("mcpb: the format's own tools unpack it and pass its manifest (skips offlin
   const out = path.join(folder, "unpacked");
   const mcpbCli = "npx --yes @anthropic-ai/mcpb@2.1.2";
   execSync(`${mcpbCli} unpack "${mcpb}" "${out}"`, { stdio: "pipe", timeout: 180_000 });
-  assert.deepEqual(fs.readdirSync(out, { recursive: true }).map((p) => String(p).replaceAll("\\", "/")).sort(), ["dist", BUNDLE, "manifest.json"].sort());
+  assert.deepEqual(fs.readdirSync(out, { recursive: true }).map((p) => String(p).replaceAll("\\", "/")).sort(), [ENTRY, "manifest.json"].sort());
   const result = execSync(`${mcpbCli} validate "${path.join(out, "manifest.json")}"`, { stdio: "pipe", timeout: 180_000 }).toString();
   assert.match(result, /passes/);
+});
+
+test("mcpb: the unpacked bundle runs as a module with no package.json beside it", () => {
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "mm-mcpb-run-"));
+  try {
+    for (const [name, data] of entries) fs.writeFileSync(path.join(out, name), data);
+    // As Node 20.0-20.18 and 22.0-22.6 load it: no detection of ES module syntax in a .js.
+    const version = execFileSync(process.execPath, ["--no-experimental-detect-module", path.join(out, ENTRY), "--version"], { cwd: out, stdio: "pipe" });
+    assert.equal(version.toString().trim(), pkg.version);
+  } finally {
+    fs.rmSync(out, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  }
+});
+
+test("bundle: the server leaves with code 0 when its client closes stdin, after reading the site (skips offline)", async (t: TestContext) => {
+  try {
+    await lookup("motionmockups.com");
+  } catch {
+    t.skip("motionmockups.com cannot be reached");
+    return;
+  }
+  // The public site, as installed. On Windows, process.exit() right after the catalog fetch
+  // aborted Node ("Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)", src\win\async.c)
+  // while V8 was still compiling undici's WebAssembly HTTP parser in the background.
+  const env: NodeJS.ProcessEnv = { ...process.env, MOTIONMOCKUPS_DATA: path.join(folder, "data") };
+  delete env.MOTIONMOCKUPS_ORIGIN;
+  for (let i = 0; i < 3; i++) {
+    const { code, stderr } = await new Promise<{ code: number | null; stderr: string }>((resolve) => {
+      const child = spawn(process.execPath, [fileURLToPath(at(BUNDLE)), "mcp"], { env, stdio: ["pipe", "pipe", "pipe"] });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => (stderr += chunk));
+      child.stdout.resume();
+      child.stdin.end();
+      child.on("exit", (code) => resolve({ code, stderr }));
+    });
+    assert.doesNotMatch(stderr, /Assertion failed/);
+    assert.equal(code, 0, stderr);
+  }
 });

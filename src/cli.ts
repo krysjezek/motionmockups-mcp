@@ -9,7 +9,7 @@ import { siteOrigin } from "./origin.ts";
 import { dataFolder } from "./paths.ts";
 import { createServer, settingsFromEnv, type AdapterServer } from "./server.ts";
 import { renderOnce } from "./session.ts";
-import { foldersWithArgs, type Problem } from "./folders.ts";
+import type { Problem } from "./folders.ts";
 import { VERSION as version } from "./version.ts";
 
 const USAGE = `motionmockups ${version}
@@ -17,7 +17,7 @@ const USAGE = `motionmockups ${version}
 Usage: motionmockups mcp [folder ...]
 
 Runs the Motion Mockups MCP server on stdio, for an MCP client such as Claude Code, Cursor or Claude Desktop.
-Folders given after mcp are allowed as if they were in MOTIONMOCKUPS_FOLDERS.`;
+Each folder given after mcp is allowed, as one folder, besides MOTIONMOCKUPS_FOLDERS.`;
 
 const log = (line: string) => {
   try {
@@ -32,7 +32,10 @@ const refuse = (problems: Problem[]) => {
   process.exitCode = 1;
 };
 
-async function mcp(): Promise<void> {
+/** How long a shutdown waits for the event loop to empty before it ends the process. */
+const EXIT_GRACE_MS = 1000;
+
+async function mcp(folders: string[]): Promise<void> {
   // Nothing may write to stdout but the transport.
   console.log = console.info = console.debug = console.error;
 
@@ -41,8 +44,17 @@ async function mcp(): Promise<void> {
   // before the process ends. A write error is never left uncaught in the middle of that.
   let adapter: AdapterServer | undefined;
   let stopping: Promise<void> | undefined;
+  // It then leaves by letting the event loop empty, not by process.exit(): on Windows, exiting
+  // while V8 still compiles undici's WebAssembly HTTP parser in the background (just after the
+  // catalog fetch) aborts Node with "Assertion failed: !(handle->flags & UV_HANDLE_CLOSING)"
+  // (src\win\async.c). Only a handle that would still hold the loop open is cut off, a
+  // second later.
   const shutdown = (code: number) => {
-    stopping ??= (adapter ? adapter.stop() : Promise.resolve()).finally(() => process.exit(code));
+    stopping ??= (adapter ? adapter.stop() : Promise.resolve()).finally(() => {
+      process.exitCode = code;
+      process.stdin.destroy();
+      setTimeout(() => process.exit(code), EXIT_GRACE_MS).unref();
+    });
   };
   process.stderr.on("error", () => {});
   process.stdout.on("error", () => shutdown(0));
@@ -59,6 +71,7 @@ async function mcp(): Promise<void> {
   adapter = await createServer({
     origin: origin.value,
     env: process.env,
+    folders,
     fetch: globalThis.fetch,
     renderOnce,
     data: data.value,
@@ -85,8 +98,7 @@ const [command, ...rest] = process.argv.slice(2);
 if (command === "--version" || command === "-v") {
   console.log(version);
 } else if (command === "mcp" && !rest.some((arg) => arg.startsWith("-"))) {
-  if (rest.length > 0) process.env.MOTIONMOCKUPS_FOLDERS = foldersWithArgs(process.env.MOTIONMOCKUPS_FOLDERS, rest);
-  mcp().catch((error) => {
+  mcp(rest).catch((error) => {
     log(`motionmockups: the server could not start: ${error instanceof Error ? error.message : String(error)}`);
     process.exit(1);
   });
