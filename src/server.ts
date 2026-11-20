@@ -18,7 +18,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 
-import { catalogSource, CATALOG_TIMEOUT_MS, serverInstructions, type AgentCatalog } from "./catalog.ts";
+import { ADAPTERS_NOTE, catalogSource, CATALOG_TIMEOUT_MS, serverInstructions, type AgentCatalog } from "./catalog.ts";
 import { connectFlows, currentAccount, disconnectAccount, openInBrowser, type Account, type Launcher } from "./connect.ts";
 import { allowedFolders, type Checked, type Problem } from "./folders.ts";
 import { checkPlan, overridesOf, scenesWithNotes, suggest, tasteWarnings } from "./guidance.ts";
@@ -258,13 +258,16 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   // whether the site blocks this version (src/killswitch.ts), said once each time it begins.
   // At most IGNORED_LINES of them per start, then one line counting the rest.
   const noted = new Set<string>();
+  let capped = 0;
   let wasBlocked = false;
   const inspect = (c: AgentCatalog): Problem | undefined => {
     let more = 0;
     for (const line of c.ignored ?? []) {
       if (noted.has(line)) continue;
       noted.add(line);
-      if (noted.size <= IGNORED_LINES) log(`motionmockups: ${line}`);
+      // The kill switch's own note is never among those cut: it says every version is allowed.
+      if (line.startsWith(ADAPTERS_NOTE)) log(`motionmockups: ${line}`);
+      else if (++capped <= IGNORED_LINES) log(`motionmockups: ${line}`);
       else more++;
     }
     if (more) log(`motionmockups: … and ${more} more of the site's guidance left out.`);

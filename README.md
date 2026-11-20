@@ -90,14 +90,18 @@ scene list, and the adapter passes it on as data in tool results:
 The notes are suggestions, and those marked `reviewed: false` are drafts.
 Only the site's briefing becomes the agent's instructions (at most 8,000
 characters). Everything else is capped: notes at 500 characters, sequence
-titles and reasons at 300, names (a scene's id, title and collection, a
-device, a move, a goal) at 100, a device's tips at 20 of 300 characters, and
-lists at 50. A taste rule this adapter does not know, or a value that makes
-no sense (a film length that ends before it starts, a clip count that is not
-a whole number above 0, an empty list of openers or closers), is ignored with
-one line on stderr; at most 20 such lines per start, then one counting the
-rest. A description the site gives for a tool this adapter does not have is
-never used.
+titles and reasons at 300, names (a scene's title and collection, a move, a
+goal) at 100, a device's tips at 20 of 300 characters, lists (roles, pairs,
+openers, closers, a sequence's clips) at 50, the moves' and collections'
+notes at 500 entries and sequences at 1,000. A scene id or device name longer
+than 100 characters names nothing the page renders, so that scene, or that
+device with its scenes, is left out. A taste rule this adapter does not know,
+or a value that makes no sense (a film length that ends before it starts, a
+clip count that is not a whole number above 0, an empty list of openers or
+closers), is ignored. Each of these is said in one line on stderr: at most 20
+such lines per start, then one counting the rest; a note that the kill
+switch's block could not be read is always said. A description the site
+gives for a tool this adapter does not have is never used.
 
 ## Settings
 

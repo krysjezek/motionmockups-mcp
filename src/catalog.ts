@@ -111,6 +111,8 @@ export interface AgentCatalog {
 }
 
 export const CATALOG_PATH = "/agent/catalog.json";
+/** How every note about an unreadable adapters block starts: the server logs these whatever its cap. */
+export const ADAPTERS_NOTE = "the site's adapters block";
 export const CATALOG_TIMEOUT_MS = 5_000;
 /** Far above the real catalog (about 40 kB); a body past this is not the catalog. */
 const MAX_BYTES = 4 * 1024 * 1024;
@@ -177,39 +179,58 @@ export function checkCatalog(value: unknown): AgentCatalog | string {
   )
     return "its rules are incomplete";
   const ignored: string[] = [];
+  // The kill switch's note first: it must reach stderr whatever else the site's guidance brings.
+  let adapters: Adapters | undefined;
+  if (value.adapters !== undefined) {
+    // Never a lock-out by accident: a block that cannot be read is as if it were not there.
+    const checked = checkAdapters(value.adapters);
+    if (typeof checked === "string") ignored.push(`${ADAPTERS_NOTE} ${checked}; it is ignored, and every version of this adapter is allowed.`);
+    else adapters = checked;
+  }
+  // A device or scene id longer than a name may be is never one the page renders: cut, it would
+  // name nothing, so it is left out (a device with its scenes), with one line each.
+  const rawDevices = value.devices as Record<string, any>[];
+  const longDevices = rawDevices.filter((d) => d.device.length > NAME_CHARS).length;
+  if (longDevices)
+    ignored.push(`${longDevices} of the site's devices ha${longDevices === 1 ? "s" : "ve"} a name longer than ${NAME_CHARS} characters; left out, with their scenes.`);
+  const devices = rawDevices.filter((d) => d.device.length <= NAME_CHARS);
+  if (devices.length === 0) return "it has no devices";
+  const rawScenes = value.scenes as Record<string, any>[];
+  const longScenes = rawScenes.filter((s) => s.id.length > NAME_CHARS || s.device.length > NAME_CHARS).length;
+  if (longScenes)
+    ignored.push(
+      `${longScenes} of the site's scenes ha${longScenes === 1 ? "s" : "ve"} an id or device name longer than ${NAME_CHARS} characters; left out.`,
+    );
   const catalog: AgentCatalog = {
     contract: 1,
     briefing: value.briefing,
     // Rebuilt field by field, each name and list capped: a field the adapter does not know
     // never reaches a tool result.
-    devices: (value.devices as Record<string, any>[]).map((d) => ({
-      device: cap(d.device, NAME_CHARS),
+    devices: devices.map((d) => ({
+      device: d.device,
       fps: d.fps,
       screen: { width: d.screen.width, height: d.screen.height },
       tips: (d.tips as string[]).slice(0, TIPS_MAX).map((tip) => cap(tip, TIP_CHARS)),
     })),
     rules: r as unknown as AgentCatalog["rules"],
-    scenes: (value.scenes as Record<string, unknown>[]).map((s) => {
-      const scene: Scene = {
-        id: cap(s.id as string, NAME_CHARS),
-        device: cap(s.device as string, NAME_CHARS),
-        collection: cap(s.collection as string, NAME_CHARS),
-        title: cap(s.title as string, NAME_CHARS),
-        seconds: s.seconds as number,
-        poster: s.poster as string,
-      };
-      const notes = pick(s.notes, SCENE_NOTE_FIELDS);
-      if (notes) scene.notes = notes;
-      return scene;
-    }),
+    scenes: rawScenes
+      .filter((s) => s.id.length <= NAME_CHARS && s.device.length <= NAME_CHARS)
+      .map((s) => {
+        const scene: Scene = {
+          id: s.id,
+          device: s.device,
+          collection: cap(s.collection, NAME_CHARS),
+          title: cap(s.title, NAME_CHARS),
+          seconds: s.seconds,
+          poster: s.poster,
+        };
+        const notes = pick(s.notes, SCENE_NOTE_FIELDS);
+        if (notes) scene.notes = notes;
+        return scene;
+      }),
     ...cleanGuidance(value, ignored),
   };
-  if (value.adapters !== undefined) {
-    // Never a lock-out by accident: a block that cannot be read is as if it were not there.
-    const adapters = checkAdapters(value.adapters);
-    if (typeof adapters === "string") ignored.push(`the site's adapters block ${adapters}; it is ignored, and every version of this adapter is allowed.`);
-    else catalog.adapters = adapters;
-  }
+  if (adapters) catalog.adapters = adapters;
   if (ignored.length) catalog.ignored = ignored;
   return catalog;
 }
@@ -231,6 +252,9 @@ export const LIST_ITEMS = 50;
 /** The longest device tip passed on, and how many of a device's tips. */
 export const TIP_CHARS = 300;
 export const TIPS_MAX = 20;
+/** The most moves' or collections' notes, and the most recipes, read. */
+export const MAP_ENTRIES = 500;
+export const MAX_RECIPES = 1_000;
 /** The longest tool description taken from the site. */
 export const MAX_TOOL_TEXT = 2_000;
 /** The taste rule types this adapter knows. */
@@ -279,7 +303,9 @@ const names = (v: unknown) => (v as string[]).slice(0, LIST_ITEMS).map((n) => ca
 function notesMap<T>(value: unknown, fields: Record<string, Kind>): Record<string, T> | undefined {
   if (!isObject(value)) return undefined;
   const out: Record<string, T> = {};
-  for (const [name, v] of Object.entries(value).slice(0, 500)) {
+  for (const [name, v] of Object.entries(value).slice(0, MAP_ENTRIES)) {
+    // "__proto__" as a key would set the map's prototype, not add an entry.
+    if (name === "__proto__") continue;
     const notes = pick<T>(v, fields);
     if (notes) out[cap(name, NAME_CHARS)] = notes;
   }
@@ -307,9 +333,9 @@ function cleanTaste(value: unknown, ignored: string[]): Taste | undefined {
       taste.filmSeconds = [(v as number[])[0]!, (v as number[])[1]!];
     else if ((key === "oneCollection" || key === "noRepeatMoveBackToBack") && typeof v === "boolean") taste[key] = v;
     else if ((key === "openers" || key === "closers") && strings(v) && (v as string[]).length > 0)
-      taste[key] = (v as string[]).slice(0, 500).map((n) => cap(n, NAME_CHARS));
+      taste[key] = (v as string[]).slice(0, LIST_ITEMS).map((n) => cap(n, NAME_CHARS));
     else if (key === "avoidPairs" && pairs(v))
-      taste.avoidPairs = (v as string[][]).slice(0, 500).map(([a, b]): [string, string] => [cap(a!, NAME_CHARS), cap(b!, NAME_CHARS)]);
+      taste.avoidPairs = (v as string[][]).slice(0, LIST_ITEMS).map(([a, b]): [string, string] => [cap(a!, NAME_CHARS), cap(b!, NAME_CHARS)]);
     else if (key === "maxClips" && Number.isSafeInteger(v) && (v as number) > 0) taste.maxClips = v as number;
     else ignored.push(`the site's taste rule "${key}" has a value this adapter cannot read; it is ignored.`);
   }
@@ -324,7 +350,7 @@ function cleanRecipe(v: unknown): Recipe | undefined {
   if (!clips.every((c) => isObject(c) && isString(c.move) && isNumber(c.seconds))) return undefined;
   if (!isObject(resolved)) return undefined;
   const ids: Record<string, string[]> = {};
-  for (const [collection, list] of Object.entries(resolved)) if (strings(list)) ids[collection] = list as string[];
+  for (const [collection, list] of Object.entries(resolved)) if (collection !== "__proto__" && strings(list)) ids[collection] = list as string[];
   return {
     id: cap(id as string, NAME_CHARS),
     goal: cap(goal as string, NAME_CHARS),
@@ -348,7 +374,7 @@ function cleanGuidance(value: Record<string, unknown>, ignored: string[]): Parti
   const taste = cleanTaste(value.taste, ignored);
   if (taste) out.taste = taste;
   if (Array.isArray(value.recipes)) {
-    const recipes = value.recipes.slice(0, 1_000).map(cleanRecipe);
+    const recipes = value.recipes.slice(0, MAX_RECIPES).map(cleanRecipe);
     const kept = recipes.filter((r): r is Recipe => r !== undefined);
     if (kept.length < recipes.length) ignored.push(`${recipes.length - kept.length} of the site's recipes could not be read; they are not suggested.`);
     out.recipes = kept;

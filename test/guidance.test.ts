@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { checkCatalog, LIST_ITEMS, MAX_TOOL_TEXT, NAME_CHARS, NOTE_CHARS, TIP_CHARS, TIPS_MAX, TITLE_CHARS, type AgentCatalog } from "../src/catalog.ts";
+import { checkCatalog, LIST_ITEMS, MAP_ENTRIES, MAX_RECIPES, MAX_TOOL_TEXT, NAME_CHARS, NOTE_CHARS, TIP_CHARS, TIPS_MAX, TITLE_CHARS, type AgentCatalog } from "../src/catalog.ts";
 import { checkPlan, MAX_SUGGESTIONS, maxClipSeconds, planProblems, scenesWithNotes, suggest, tasteWarnings } from "../src/guidance.ts";
 import { planSchema, type Plan } from "../src/plan.ts";
 import { GUIDED, oldCatalog } from "./fixtures/guided-catalog.ts";
@@ -207,11 +207,10 @@ test("catalog text is capped: notes at 500 characters, recipe titles and whys at
   assert.equal(c.recipes![0]!.why.length, TITLE_CHARS);
 });
 
-test("catalog names are capped at 100 characters: a scene's id, title and collection, a device, moves, goals and roles", () => {
+test("catalog names are capped at 100 characters: a scene's title and collection, moves, goals and roles", () => {
   const long = (c: string) => c.repeat(5_000);
   const value = structuredClone(GUIDED) as any;
-  Object.assign(value.scenes[0], { id: long("i"), title: long("t"), collection: long("c"), device: long("d") });
-  value.devices[0].device = long("D");
+  Object.assign(value.scenes[0], { title: long("t"), collection: long("c") });
   value.scenes[1].notes.move = long("m");
   value.scenes[1].notes.pace = long("p");
   value.scenes[1].notes.screenDetail = long("s");
@@ -231,8 +230,7 @@ test("catalog names are capped at 100 characters: a scene's id, title and collec
   };
   assert.equal(NAME_CHARS, 100);
   const [scene] = c.scenes;
-  for (const field of ["id", "title", "collection", "device"] as const) capped(scene![field], `scene ${field}`);
-  capped(c.devices[0]!.device, "device");
+  for (const field of ["title", "collection"] as const) capped(scene![field], `scene ${field}`);
   for (const field of ["move", "pace", "screenDetail"] as const) capped(c.scenes[1]!.notes![field], `notes ${field}`);
   capped(c.scenes[1]!.notes!.goodAs![0], "a goodAs role");
   capped(Object.keys(c.moves!).find((m) => m.startsWith("MMM")), "a move's name");
@@ -246,12 +244,46 @@ test("catalog names are capped at 100 characters: a scene's id, title and collec
   capped(c.recipes![0]!.clips[0]!.move, "a recipe move");
 });
 
+test("a scene id or device name too long to render is left out, not cut: a device with its scenes, one line each", () => {
+  const long = "x".repeat(NAME_CHARS + 1);
+  const value = structuredClone(GUIDED) as any;
+  value.scenes[0].id = long;
+  // iPhone, by a name too long, with its four scenes.
+  value.devices[1].device = long;
+  for (const scene of value.scenes) if (scene.device === "iPhone") scene.device = long;
+  const c = catalog(value);
+  assert.deepEqual(
+    c.devices.map((d) => d.device),
+    ["Display"],
+  );
+  assert.deepEqual(
+    c.scenes.map((s) => s.id),
+    GUIDED.scenes.filter((s, i) => i !== 0 && s.device === "Display").map((s) => s.id),
+  );
+  assert.deepEqual(c.ignored, [
+    "1 of the site's devices has a name longer than 100 characters; left out, with their scenes.",
+    "5 of the site's scenes have an id or device name longer than 100 characters; left out.",
+  ]);
+  // Exactly 100 is a name.
+  const edge = structuredClone(GUIDED) as any;
+  edge.scenes[0].id = "y".repeat(NAME_CHARS);
+  assert.equal(catalog(edge).scenes[0]!.id, "y".repeat(NAME_CHARS));
+  assert.equal(catalog(edge).ignored, undefined);
+  // No device left is no catalog.
+  const none = structuredClone(GUIDED) as any;
+  for (const d of none.devices) d.device = long;
+  assert.equal(checkCatalog(none), "it has no devices");
+});
+
 test("catalog lists are capped: device tips at 20 of 300 characters, roles and pairs at 50, a recipe of more than 50 clips dropped", () => {
   const value = structuredClone(GUIDED) as any;
   value.devices[0].tips = Array.from({ length: 30 }, (_, i) => `${i}`.padEnd(1_000, "t"));
   value.scenes[0].notes.goodAs = Array.from({ length: 80 }, (_, i) => `role ${i}`);
   value.moves.Orbit.avoidWith = Array.from({ length: 80 }, (_, i) => `move ${i}`);
   value.recipes[0].clips = Array.from({ length: LIST_ITEMS + 1 }, () => ({ move: "Low Arc", seconds: 1 }));
+  value.taste.openers = Array.from({ length: 80 }, (_, i) => `opener ${i}`);
+  value.taste.closers = Array.from({ length: 80 }, (_, i) => `closer ${i}`);
+  value.taste.avoidPairs = Array.from({ length: 80 }, (_, i) => [`a ${i}`, `b ${i}`]);
   const c = catalog(value);
   assert.equal(TIP_CHARS, 300);
   assert.equal(TIPS_MAX, 20);
@@ -263,6 +295,19 @@ test("catalog lists are capped: device tips at 20 of 300 characters, roles and p
   assert.equal(LIST_ITEMS, 50);
   assert.equal(c.scenes[0]!.notes!.goodAs!.length, LIST_ITEMS);
   assert.equal(c.moves!.Orbit!.avoidWith!.length, LIST_ITEMS);
+  for (const list of ["openers", "closers", "avoidPairs"] as const) assert.equal(c.taste![list]!.length, LIST_ITEMS, list);
+  assert.equal(c.taste!.openers![49], "opener 49", "the first 50, in order");
+  // Maps and the recipe list are bounded too: 500 moves' or collections' notes, 1,000 recipes.
+  assert.equal(MAP_ENTRIES, 500);
+  assert.equal(MAX_RECIPES, 1_000);
+  const many = structuredClone(GUIDED) as any;
+  many.moves = Object.fromEntries(Array.from({ length: 600 }, (_, i) => [`Move ${i}`, { framing: "x" }]));
+  many.collectionNotes = Object.fromEntries(Array.from({ length: 600 }, (_, i) => [`Place ${i}`, { light: "x" }]));
+  many.recipes = Array.from({ length: 1_200 }, (_, i) => ({ ...GUIDED.recipes[0], id: `r${i}` }));
+  const bounded = catalog(many);
+  assert.equal(Object.keys(bounded.moves!).length, MAP_ENTRIES);
+  assert.equal(Object.keys(bounded.collectionNotes!).length, MAP_ENTRIES);
+  assert.equal(bounded.recipes!.length, MAX_RECIPES);
   assert.equal(c.recipes!.length, GUIDED.recipes.length - 1, "the recipe of 51 clips is not suggested");
   assert.match(c.ignored!.join("\n"), /1 of the site's recipes could not be read/);
   // A device keeps only the fields the adapter knows.
@@ -300,6 +345,26 @@ test("taste values that make no sense are dropped, each with one line saying so"
   assert.deepEqual(c.taste!.filmSeconds, [8, 8]);
   assert.equal(c.taste!.maxClips, 1);
   assert.equal(c.ignored, undefined);
+  // A "__proto__" key, as JSON.parse makes it, is an unknown rule; it never becomes the taste's prototype.
+  const proto = structuredClone(GUIDED) as any;
+  proto.taste = JSON.parse('{"__proto__": {"maxClips": 1, "oneCollection": false}, "openers": ["Low Arc"]}');
+  const p = catalog(proto);
+  assert.equal(p.taste!.maxClips, undefined, "nothing inherited");
+  assert.equal(Object.getPrototypeOf(p.taste), Object.prototype);
+  assert.deepEqual(p.taste, { openers: ["Low Arc"] });
+  assert.deepEqual(p.ignored, [`the site's taste rule "__proto__" is not one this adapter knows; it is ignored.`]);
+  // The same in the notes maps and a recipe's resolved scenes: never a prototype, never an entry.
+  const maps = structuredClone(GUIDED) as any;
+  maps.moves = JSON.parse('{"__proto__": {"framing": "polluted"}, "Orbit": {"framing": "Circles."}}');
+  maps.collectionNotes = JSON.parse('{"__proto__": {"light": "polluted"}}');
+  maps.recipes[0].resolved = JSON.parse('{"__proto__": ["home-xdr-shot-4", "home-xdr-shot-2"], "Home": ["home-xdr-shot-4", "home-xdr-shot-2"]}');
+  const m = catalog(maps);
+  assert.deepEqual(Object.keys(m.moves!), ["Orbit"]);
+  assert.equal(Object.getPrototypeOf(m.moves), Object.prototype);
+  assert.equal((m.moves as any).framing, undefined);
+  assert.equal(Object.getPrototypeOf(m.collectionNotes), Object.prototype);
+  assert.deepEqual(Object.keys(m.recipes![0]!.resolved), ["Home"]);
+  assert.equal(Object.getPrototypeOf(m.recipes![0]!.resolved), Object.prototype);
   // No opener list: no opener warning (an empty one would have warned on every film).
   const open = structuredClone(GUIDED) as any;
   open.taste.openers = [];
@@ -319,7 +384,9 @@ test("check_plan: a device off only in its case is named as it is spelt", () => 
   const base: Plan = { contract: 1, device: "Display", aspect: "16:9", clips: [{ scene: LOFT(1) }] };
   const [wrongCase] = planProblems({ ...base, device: "display" }, C);
   assert.equal(wrongCase!.code, "device");
-  assert.match(wrongCase!.fix, /Write it as "Display"/);
+  assert.equal(wrongCase!.fix, 'Write it as "Display": device names are compared exactly, case and spaces included.');
+  // Spaces around it too.
+  assert.match(planProblems({ ...base, device: " display " }, C)[0]!.fix, /^Write it as "Display": .*case and spaces included\.$/);
   assert.match(planProblems({ ...base, device: "IPHONE" }, C)[0]!.fix, /"iPhone"/);
   // A device that is not one at all gets the list.
   assert.equal(planProblems({ ...base, device: "Watch" }, C)[0]!.fix, "Use one of: Display, iPhone.");

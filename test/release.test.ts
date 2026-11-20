@@ -159,6 +159,34 @@ test("release: a missing Chrome is a clear refusal naming Chrome and where it lo
   assert.notEqual((await call("list_scenes")).isError, true, "the adapter keeps answering");
 });
 
+test(
+  "release: with nothing where Chrome installs, the refusal lists each place the adapter looked",
+  { skip: process.platform === "darwin" ? "macOS's places are fixed (/Applications); test/chrome-find.test.ts empties them" : false },
+  async (t) => {
+    const project = temp(t, "mm-release-project-");
+    const data = temp(t, "mm-release-data-");
+    // The variables the search reads, each pointed at an empty folder (keys as the client's own
+    // environment spells them, so they replace its values).
+    const empty = (name: string) => temp(t, `mm-release-${name}-`);
+    const env: Record<string, string> = windows
+      ? { PROGRAMFILES: empty("pf"), "ProgramFiles(x86)": empty("pf86"), LOCALAPPDATA: empty("local") }
+      : { PATH: `${empty("bin")}:${empty("usrbin")}` };
+    const places = windows
+      ? Object.values(env).map((base) => path.join(base, "Google", "Chrome", "Application", "chrome.exe"))
+      : env.PATH!.split(":");
+    const { call } = await adapter(t, { origin: await site(t, () => CATALOG), data, folders: [project], env });
+    const result = await call("render", { plan: PLAN });
+    assert.equal(result.isError, true);
+    const [problem] = structured(result).problems;
+    assert.equal(problem.code, "chrome", JSON.stringify(problem));
+    assert.match(problem.message, windows ? /^Google Chrome was not found\. The adapter looked in / : /^Google Chrome or Chromium was not found on PATH\. /);
+    for (const place of places) assert.ok(problem.message.includes(place), `${place} in: ${problem.message}`);
+    if (!windows) for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser"]) assert.ok(problem.message.includes(name), name);
+    assert.match(problem.fix, /Install Google Chrome from https:\/\/www\.google\.com\/chrome\//);
+    assert.equal(fs.existsSync(path.join(data, LOCK_NAME)), false, "no lock taken");
+  },
+);
+
 test("release: a version the site blocks refuses every tool but account and disconnect, and never starts Chrome", async (t) => {
   const project = temp(t, "mm-release-project-");
   const data = temp(t, "mm-release-data-");
