@@ -144,8 +144,9 @@ the saved connection from this computer, whatever the site answered;
 renders are free previews again. The result says whether the site confirmed
 the revoke. If it did not (the site could not be reached, for one), the
 token may still be live: revoke it on motionmockups.com, under Account, then
-Connected agents, Revoke. A token saved for another site is deleted, never
-sent. A token also stops working after 90 days without use, or when the
+Connected agents, Revoke. If the file itself cannot be deleted, the result
+says so and gives its path (`notDeleted`), to delete by hand. A token saved
+for another site is deleted, never sent. A token also stops working after 90 days without use, or when the
 account is deleted. Once the
 site no longer accepts it, the adapter deletes the file itself and says to
 connect again. When Pro ends, the connection stays and renders become free

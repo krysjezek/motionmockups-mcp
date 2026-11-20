@@ -15,7 +15,7 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 
 import type { Checked, Problem } from "./folders.ts";
-import { clearToken, isAgentToken, readToken, writeToken } from "./token.ts";
+import { clearToken, isAgentToken, readToken, TOKEN_FILE, writeToken } from "./token.ts";
 
 /** Any one request to the site. */
 const REQUEST_MS = 15_000;
@@ -282,6 +282,8 @@ export interface Disconnected {
   revoked: boolean;
   /** Why the site did not confirm, in words; never the token. */
   detail?: string;
+  /** The saved file that is there but could not be deleted, and why. */
+  notDeleted?: { path: string; reason: string };
 }
 
 /**
@@ -306,8 +308,15 @@ export async function disconnectAccount(origin: URL, data: string, fetchImpl: ty
       detail = signal?.aborted ? "the call was cancelled" : failure(error);
     }
   }
-  const removed = await clearToken(data).catch(() => false);
-  return { removed, revoked, ...(detail ? { detail } : {}) };
+  // clearToken says false when there is no file; a file it cannot delete is a throw.
+  let removed = false;
+  let notDeleted: Disconnected["notDeleted"];
+  try {
+    removed = await clearToken(data);
+  } catch (error) {
+    notDeleted = { path: path.join(data, TOKEN_FILE), reason: (error as NodeJS.ErrnoException)?.code ?? failure(error) };
+  }
+  return { removed, revoked, ...(detail ? { detail } : {}), ...(notDeleted ? { notDeleted } : {}) };
 }
 
 /** Runs a program with fixed arguments and no shell, without waiting for it. */

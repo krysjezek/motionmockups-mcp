@@ -1019,6 +1019,54 @@ test("connect_account disconnect: a network failure still deletes the file and s
   assert.doesNotMatch(JSON.stringify(result), /mma_/);
 });
 
+test("connect_account disconnect: a saved connection that cannot be deleted says so and where, after the site revoked it", async (t) => {
+  const { client, site, data } = await onSite(t, {
+    // While the site revokes it, the file becomes a folder with a file in it: there, but not deletable as a file.
+    disconnect: () => {
+      const file = path.join(data, TOKEN_FILE);
+      fs.rmSync(file, { force: true });
+      fs.mkdirSync(file);
+      fs.writeFileSync(path.join(file, "keep"), "x");
+      return { status: 200, body: { status: "disconnected" } };
+    },
+  });
+  await writeToken(data, site.origin, TOKEN);
+  const call = await client.callTool({ name: "connect_account", arguments: { disconnect: true } });
+  assert.notEqual(call.isError, true);
+  const result = structured(call);
+  assert.equal(result.revoked, true);
+  assert.equal(result.removed, false);
+  assert.equal(result.notDeleted, path.join(data, TOKEN_FILE));
+  assert.equal(result.tier, "free", "revoked: renders are free whatever the file");
+  assert.doesNotMatch(result.note, /no saved connection/);
+  assert.match(result.note, /could not be deleted/);
+  assert.ok(result.note.includes(path.join(data, TOKEN_FILE)), "the note says where the file is");
+  assert.match(result.note, /Delete that file by hand/);
+  assert.match(result.note, /The site revoked the connection/);
+  assert.doesNotMatch(JSON.stringify(result), /mma_/);
+});
+
+test("connect_account disconnect: not revoked and not deleted says the connection may still work", async (t) => {
+  const { client, site, data } = await onSite(t, {
+    disconnect: () => {
+      const file = path.join(data, TOKEN_FILE);
+      fs.rmSync(file, { force: true });
+      fs.mkdirSync(file);
+      fs.writeFileSync(path.join(file, "keep"), "x");
+      return { status: 503, body: { error: "Try again later." } };
+    },
+  });
+  await writeToken(data, site.origin, TOKEN);
+  const result = structured(await client.callTool({ name: "connect_account", arguments: { disconnect: true } }));
+  assert.equal(result.revoked, false);
+  assert.equal(result.removed, false);
+  assert.equal(result.tier, undefined, "no tier the adapter cannot vouch for");
+  assert.match(result.note, /could not be deleted/);
+  assert.match(result.note, /did not confirm/);
+  assert.match(result.note, /call account to see/);
+  assert.match(result.note, /Connected agents/);
+});
+
 // ---- Guidance: suggest_sequence, check_plan, notes and overrides ----
 
 const guided = (t: TestContext, catalog: unknown = GUIDED, options: Parameters<typeof start>[1] = {}) =>

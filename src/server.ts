@@ -567,7 +567,20 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
         if (wait || open)
           return refused([{ code: "input", message: "disconnect cannot be combined with wait or open.", fix: "Send disconnect: true alone." }]);
         await flows.end();
-        const { removed, revoked, detail } = await disconnectAccount(deps.origin, deps.data, deps.fetch, extra.signal);
+        const { removed, revoked, detail, notDeleted } = await disconnectAccount(deps.origin, deps.data, deps.fetch, extra.signal);
+        if (notDeleted)
+          return answer({
+            // Without the site's word, the file left behind may still work: account says.
+            ...(revoked ? { signedIn: false, tier: "free" } : {}),
+            removed,
+            revoked,
+            notDeleted: notDeleted.path,
+            note:
+              `The saved connection at ${notDeleted.path} could not be deleted (${notDeleted.reason}). Delete that file by hand. ` +
+              (revoked
+                ? "The site revoked the connection, so renders are free watermarked previews."
+                : `The site did not confirm that it revoked the connection (${detail ?? "no answer"}), so it may still work until the file is gone; call account to see. ${REVOKE}`),
+          });
         return answer({
           signedIn: false,
           tier: "free",
