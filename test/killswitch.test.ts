@@ -13,25 +13,10 @@ import { CATALOG_MAX_AGE_MS, CATALOG_RETRY_MS, checkCatalog } from "../src/catal
 import { blockedProblem, checkAdapters, compareVersions, MESSAGE_CHARS, parseRange, satisfies, UPGRADE_FIX } from "../src/killswitch.ts";
 import { createServer, type ServerDeps } from "../src/server.ts";
 import type { Rendered } from "../src/session.ts";
+import { assertBlocked as assertBlockedWith, blocking, CATALOG, PLAN, REFUSED, withAdapters } from "./fixtures/killswitch.ts";
 
-const CATALOG = {
-  contract: 1,
-  briefing: "The test briefing.",
-  devices: [{ device: "iPhone", fps: 60, screen: { width: 1179, height: 2556 }, tips: ["Record portrait."] }],
-  scenes: [{ id: "blanc-iphone-shot-1", device: "iPhone", collection: "Gallery", title: "Orbit", seconds: 8, poster: "https://assets.example/p1.webp" }],
-  rules: {
-    aspects: ["9:16"],
-    sizes: [1080],
-    minClipSeconds: 1,
-    maxImageSeconds: 60,
-    videoTypes: ["video/mp4"],
-    imageTypes: ["image/png"],
-    delivery: ["film", "scenes"],
-  },
-};
-const PLAN = { contract: 1, device: "iPhone", aspect: "9:16", clips: [{ scene: "blanc-iphone-shot-1" }] };
 const DELIVERED: Rendered = { ok: true, value: { files: [{ path: "/p/motion-mockups/a.mp4", bytes: 10 }], warnings: [], notice: "n" } };
-const with_ = (adapters: unknown) => ({ ...CATALOG, adapters });
+const with_ = withAdapters;
 const structured = (result: any) => result.structuredContent as any;
 
 // ---- Versions and ranges ----
@@ -199,24 +184,9 @@ async function start(
   return { client, call, clock, fetches, renders };
 }
 
-const BLOCKING = { allowed: ">=0.1.0", blocked: ["0.1.0"], message: "0.1.0 loses renders; update the adapter." };
+const BLOCKING = blocking("0.1.0");
 
-/** Every tool a blocked adapter refuses, with arguments it would otherwise take. */
-const REFUSED: [string, Record<string, unknown>][] = [
-  ["list_scenes", {}],
-  ["recording_spec", { device: "iPhone" }],
-  ["suggest_sequence", { goal: "launch", device: "iPhone" }],
-  ["check_plan", { plan: PLAN }],
-  ["render", { plan: PLAN }],
-  ["still", { plan: PLAN, seconds: 1, format: "png" }],
-  ["connect_account", {}],
-  ["connect_account", { wait: true }],
-];
-
-const assertBlocked = (result: any, what: string, message = BLOCKING.message) => {
-  assert.equal(result.isError, true, `${what} is refused`);
-  assert.deepEqual(structured(result).problems, [{ code: "blocked", message, fix: UPGRADE_FIX }], what);
-};
+const assertBlocked = (result: any, what: string, message = BLOCKING.message) => assertBlockedWith(result, what, message);
 
 test("blocked at start: every tool refuses but account and disconnect; nothing renders; the descriptions stay", async (t) => {
   const open = await start(t, { serve: () => CATALOG });

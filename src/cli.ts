@@ -50,11 +50,14 @@ async function mcp(folders: string[]): Promise<void> {
   // (src\win\async.c). Only a handle that would still hold the loop open is cut off, a
   // second later.
   const shutdown = (code: number) => {
-    stopping ??= (adapter ? adapter.stop() : Promise.resolve()).finally(() => {
-      process.exitCode = code;
-      process.stdin.destroy();
-      setTimeout(() => process.exit(code), EXIT_GRACE_MS).unref();
-    });
+    // A stop that fails is said on stderr, never left as an unhandled rejection; the exit code stays.
+    stopping ??= (adapter ? adapter.stop() : Promise.resolve())
+      .catch((error) => log(`motionmockups: the shutdown did not finish cleanly: ${error instanceof Error ? error.message : String(error)}`))
+      .finally(() => {
+        process.exitCode = code;
+        process.stdin.destroy();
+        setTimeout(() => process.exit(code), EXIT_GRACE_MS).unref();
+      });
   };
   process.stderr.on("error", () => {});
   process.stdout.on("error", () => shutdown(0));

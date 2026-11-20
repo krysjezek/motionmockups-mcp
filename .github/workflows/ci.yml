@@ -27,8 +27,11 @@ jobs:
       - run: npm ci
       # The tests are TypeScript run by Node's own type stripping, which Node 20 does not
       # have. On Node 20 the built bundle is checked by the smoke test below instead.
-      # GitHub's runners have Chrome installed, so the Chrome launch tests run; the render
-      # session tests skip without MOTIONMOCKUPS_TEST_ORIGIN, and the e2e is not run here.
+      # GitHub's runners have Chrome installed, so the Chrome launch tests and the release checks
+      # (test/release.test.ts: missing Chrome, cancel then render again, a blocked version, the
+      # file-system rules, on the built bundle) run; a file-system rule the runner cannot set up
+      # fails rather than skips. The render session tests skip without MOTIONMOCKUPS_TEST_ORIGIN
+      # (release-render below runs them), and the e2e is not run here.
       # Linux runners have no display: xvfb-run gives window-mode Chrome one.
       - run: npm test
         if: matrix.node != 20 && runner.os != 'Linux'
@@ -51,3 +54,47 @@ jobs:
           name: motionmockups-mcpb
           path: motionmockups.mcpb
           if-no-files-found: error
+      # The release-render job below runs only when MOTIONMOCKUPS_RELEASE_ORIGIN is set; this says so when it is not.
+      - name: Note the skipped real render
+        if: matrix.os == 'ubuntu-latest' && matrix.node == 24 && vars.MOTIONMOCKUPS_RELEASE_ORIGIN == ''
+        run: echo "::notice title=Real free render skipped::The repository variable MOTIONMOCKUPS_RELEASE_ORIGIN is not set, so release-render was skipped. Set it to a site that serves /agent to run a real free render on every system."
+
+  # A real free render from the site's public plates: the live session tests
+  # (test/session.test.ts, "a render session on the agent page") on all three systems, against
+  # the site the repository variable MOTIONMOCKUPS_RELEASE_ORIGIN names. Skipped while it is
+  # not set (the site's /agent is not public yet). The variable reaches the tests through env
+  # only, never written into a command.
+  release-render:
+    if: vars.MOTIONMOCKUPS_RELEASE_ORIGIN != ''
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      MOTIONMOCKUPS_TEST_ORIGIN: ${{ vars.MOTIONMOCKUPS_RELEASE_ORIGIN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - run: npm ci
+      # The session tests make their recording with ffmpeg and measure the film with ffprobe.
+      - name: Install ffmpeg
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: Install ffmpeg
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg
+      - name: Install ffmpeg
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg -y --no-progress
+      - name: Live session tests
+        if: runner.os != 'Linux'
+        run: node --experimental-strip-types --test test/session.test.ts
+      - name: Live session tests
+        if: runner.os == 'Linux'
+        run: xvfb-run -a node --experimental-strip-types --test test/session.test.ts

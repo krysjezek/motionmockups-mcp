@@ -109,7 +109,7 @@ function hosted(values: Record<string, string | string[]>) {
   return { args, env };
 }
 
-test("mcpb: the allowed folders reach MOTIONMOCKUPS_FOLDERS and the origin MOTIONMOCKUPS_ORIGIN", () => {
+test("mcpb: the allowed folders reach the adapter as arguments after mcp, one each, and the origin MOTIONMOCKUPS_ORIGIN", () => {
   const { allowed_folders: folders, origin } = manifest.user_config;
   assert.equal(folders.type, "directory");
   assert.equal(folders.multiple, true);

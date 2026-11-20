@@ -21,6 +21,18 @@ import { dataFolder } from "../src/paths.ts";
 
 const windows = process.platform === "win32";
 
+/**
+ * A file-system rule this machine cannot set up (links, junctions, 8.3 names, per-folder case)
+ * skips locally; on a CI runner, where each of them works, it fails instead, so a rule never
+ * silently goes unchecked on a release system. A rule that only exists on another system is
+ * skipped by its test's own `skip` option, and one this volume's kind rules out (the Kelvin sign
+ * on a case-insensitive volume) skips everywhere.
+ */
+function cannotHere(t: TestContext, reason: string): void {
+  if (process.env.GITHUB_ACTIONS === "true") assert.fail(`${reason}: a CI runner must run this file-system rule.`);
+  t.skip(reason);
+}
+
 // A real MP4 start: a 32-byte ftyp box (isom; compatible isom iso2 avc1 mp41), then a free box.
 const MP4_HEADER = Buffer.concat([
   Buffer.from([0, 0, 0, 0x20]),
@@ -178,7 +190,7 @@ test("a symlink out is refused", async (t) => {
 
   const fileLink = path.join(root, "clip.mp4");
   if (!link("file", outside, fileLink)) {
-    t.skip("this system cannot create file symlinks");
+    cannotHere(t, "this system cannot create file symlinks");
     return;
   }
   const viaFile = await readableRecording(fileLink, allowed);
@@ -197,7 +209,7 @@ test("a symlink that stays inside the root is followed", async (t) => {
   const real = write(path.join(root, "takes", "clip.mp4"), MP4_HEADER);
   const at = path.join(root, "latest.mp4");
   if (!link("file", real, at)) {
-    t.skip("this system cannot create file symlinks");
+    cannotHere(t, "this system cannot create file symlinks");
     return;
   }
   const result = await readableRecording(at, await allowedFolders([root], {}));
@@ -211,7 +223,7 @@ test("a Windows junction out is refused", { skip: !windows && "junctions exist o
   const outside = write(path.join(dir, "outside", "secret.mp4"), MP4_HEADER);
   const junction = path.join(root, "junction");
   if (!link("junction", path.dirname(outside), junction)) {
-    t.skip("mklink /J failed here");
+    cannotHere(t, "mklink /J failed here");
     return;
   }
   const result = await readableRecording(path.join(junction, "secret.mp4"), await allowedFolders([root], {}));
@@ -224,7 +236,7 @@ test("an allowed folder that is itself a link is used by its real path", async (
   const clip = write(path.join(real, "clip.mp4"), MP4_HEADER);
   const alias = path.join(dir, "alias");
   if (!link(windows ? "junction" : "dir", real, alias)) {
-    t.skip("cannot link a folder here");
+    cannotHere(t, "cannot link a folder here");
     return;
   }
   const allowed = await allowedFolders([alias], {});
@@ -313,7 +325,7 @@ test("a motion-mockups that leads out is refused", async (t) => {
   const made = link("dir", elsewhere, path.join(root, "motion-mockups")) ||
     (windows && link("junction", elsewhere, path.join(root, "motion-mockups")));
   if (!made) {
-    t.skip("cannot link a folder here");
+    cannotHere(t, "cannot link a folder here");
     return;
   }
   const result = await outputFolder(await allowedFolders([root], {}));
@@ -327,7 +339,7 @@ test("a motion-mockups junction that leads out is refused", { skip: !windows && 
   fs.mkdirSync(root);
   fs.mkdirSync(elsewhere);
   if (!link("junction", elsewhere, path.join(root, "motion-mockups"))) {
-    t.skip("mklink /J failed here");
+    cannotHere(t, "mklink /J failed here");
     return;
   }
   const result = await outputFolder(await allowedFolders([root], {}));
@@ -389,7 +401,7 @@ test("a dangling link at the name is taken, and nothing is created where it poin
   const target = path.join(dir, "elsewhere", "planted.txt");
   fs.mkdirSync(path.dirname(target));
   if (!link("file", target, path.join(out, "name.mp4"))) {
-    t.skip("this system cannot create file symlinks");
+    cannotHere(t, "this system cannot create file symlinks");
     return;
   }
   const made = await createOutput(out, "name", "mp4");
@@ -565,7 +577,7 @@ test("a case-only sibling folder on a case-sensitive volume is outside", { skip:
   const work = path.join(dir, "work");
   fs.mkdirSync(work);
   if (!fsutil("file", "setCaseSensitiveInfo", work, "enable")) {
-    t.skip("fsutil file setCaseSensitiveInfo is not permitted here");
+    cannotHere(t, "fsutil file setCaseSensitiveInfo is not permitted here");
     return;
   }
   const allowedDir = path.join(work, "Proj");
@@ -619,7 +631,7 @@ test("a folder reached by its 8.3 short name is a real folder, not a link", { sk
   fs.mkdirSync(long);
   const short = shortName(long);
   if (!short) {
-    t.skip("8.3 short names are disabled on this volume");
+    cannotHere(t, "8.3 short names are disabled on this volume");
     return;
   }
   t.diagnostic(`${long} -> ${short}`);
@@ -650,7 +662,7 @@ test("outputFolder: a motion-mockups whose real path comes back under its 8.3 sh
   fs.mkdirSync(out, { recursive: true });
   const short = shortName(out);
   if (!short) {
-    t.skip("8.3 short names are disabled on this volume");
+    cannotHere(t, "8.3 short names are disabled on this volume");
     return;
   }
   const allowed = await allowedFolders([root], {});

@@ -63,8 +63,15 @@ export function planProblems(plan: Plan, catalog: AgentCatalog): Problem[] {
   const problems: Problem[] = [];
   const devices = catalog.devices.map((d) => d.device);
   const { aspects, sizes, minClipSeconds } = catalog.rules;
-  if (!devices.includes(plan.device))
-    problems.push({ code: "device", message: `${JSON.stringify(plan.device)} is not a device.`, fix: `Use one of: ${devices.join(", ")}.` });
+  if (!devices.includes(plan.device)) {
+    // The page compares names exactly: a name off only in its case is named as it is spelt.
+    const spelt = devices.find((d) => d.toLowerCase() === plan.device.trim().toLowerCase());
+    problems.push({
+      code: "device",
+      message: `${JSON.stringify(plan.device)} is not a device.`,
+      fix: spelt ? `Write it as ${JSON.stringify(spelt)}: device names are compared exactly, case included.` : `Use one of: ${devices.join(", ")}.`,
+    });
+  }
   if (!aspects.includes(plan.aspect))
     problems.push({ code: "aspect", message: `${JSON.stringify(plan.aspect)} is not an aspect.`, fix: `Use one of: ${aspects.join(", ")}.` });
   if (plan.size !== undefined && !sizes.includes(plan.size))

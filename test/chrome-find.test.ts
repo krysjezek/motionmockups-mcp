@@ -127,3 +127,45 @@ test("no Chrome anywhere gives code chrome naming MOTIONMOCKUPS_CHROME and the d
   assertRefusal(findChrome({ PATH: "/usr/bin" }, "linux", () => false));
   assertRefusal(findChrome({}, "linux", () => false));
 });
+
+// ---- Missing Chrome: the refusal names Chrome and every place it looked (release check) ----
+
+test("missing Chrome: the refusal names Chrome and each place it looked, on every system", () => {
+  const message = (result: ReturnType<typeof findChrome>) => {
+    assertRefusal(result);
+    return result.ok ? "" : result.problems[0]!.message;
+  };
+  const win = message(findChrome(WIN_ENV, "win32", () => false));
+  assert.match(win, /^Google Chrome was not found\./);
+  for (const place of Object.values(WIN)) assert.ok(win.includes(place), `${place} in: ${win}`);
+
+  const mac = message(findChrome({ HOME: "/Users/ada" }, "darwin", () => false));
+  assert.match(mac, /^Google Chrome was not found\./);
+  for (const place of Object.values(MAC)) assert.ok(mac.includes(place), `${place} in: ${mac}`);
+
+  const linux = message(findChrome({ PATH: "/usr/local/bin:/usr/bin" }, "linux", () => false));
+  assert.match(linux, /^Google Chrome or Chromium was not found on PATH\./);
+  for (const word of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "/usr/local/bin", "/usr/bin"])
+    assert.ok(linux.includes(word), `${word} in: ${linux}`);
+  // No folder at all to look in is said so, not an empty list.
+  assert.match(message(findChrome({ PATH: "" }, "linux", () => false)), /PATH names no folder to look in/);
+  // A long PATH is named up to ten folders, then counted.
+  const long = message(findChrome({ PATH: Array.from({ length: 14 }, (_, i) => `/d${i}`).join(":") }, "linux", () => false));
+  assert.match(long, /\/d9 and 4 more\.$/);
+  assert.doesNotMatch(long, /\/d10/);
+});
+
+test("missing Chrome: MOTIONMOCKUPS_CHROME pointing nowhere is named, and the standard places are not searched instead", () => {
+  const gone = "D:\\gone\\chrome.exe";
+  const searched: string[] = [];
+  const result = findChrome({ ...WIN_ENV, MOTIONMOCKUPS_CHROME: gone }, "win32", (p) => {
+    searched.push(p);
+    return p !== gone;
+  });
+  assertRefusal(result);
+  if (!result.ok) {
+    assert.ok(result.problems[0]!.message.includes(gone));
+    assert.match(result.problems[0]!.fix, /Install Google Chrome/);
+  }
+  assert.deepEqual(searched, [gone], "only the path the person chose");
+});

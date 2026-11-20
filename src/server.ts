@@ -45,6 +45,8 @@ const MIN_TIMEOUT_MS = 60_000;
 const ROOTS_MS = 10_000;
 /** How long `stop()` waits for running renders to close Chrome and release the lock. */
 const STOP_MS = 30_000;
+/** The most lines on stderr per start about what the adapter left out of the site's guidance. */
+export const IGNORED_LINES = 20;
 
 export interface ServerDeps {
   origin: URL;
@@ -134,7 +136,11 @@ const stillInput = z
   .strict();
 const suggestInput = z
   .object({
-    goal: z.string().min(1).max(100).describe('What the film is for: "launch", "app-demo", "case-study" or "portfolio".'),
+    goal: z
+      .string()
+      .min(1)
+      .max(100)
+      .describe('What the film is for, e.g. "launch", "app-demo" or "portfolio". The site names the goals; an unknown one is answered with those there are.'),
     device: z.string().min(1).max(100).describe("The device the product runs on."),
     aspect: z.string().min(1).max(20).optional().describe("The frame wanted, such as 9:16 for a phone feed. Plans in it come first."),
     seconds: z.number().positive().optional().describe("The film length wanted, in seconds. Plans nearest it come first."),
@@ -250,14 +256,18 @@ export async function createServer(deps: ServerDeps): Promise<AdapterServer> {
   const catalog = catalogSource(deps.origin, deps.fetch, CATALOG_TIMEOUT_MS, deps.now);
   // What the adapter left out of the site's guidance, each line said once per start, and
   // whether the site blocks this version (src/killswitch.ts), said once each time it begins.
+  // At most IGNORED_LINES of them per start, then one line counting the rest.
   const noted = new Set<string>();
   let wasBlocked = false;
   const inspect = (c: AgentCatalog): Problem | undefined => {
+    let more = 0;
     for (const line of c.ignored ?? []) {
       if (noted.has(line)) continue;
       noted.add(line);
-      log(`motionmockups: ${line}`);
+      if (noted.size <= IGNORED_LINES) log(`motionmockups: ${line}`);
+      else more++;
     }
+    if (more) log(`motionmockups: … and ${more} more of the site's guidance left out.`);
     const blocked = blockedProblem(c.adapters, deps.version);
     if (blocked && !wasBlocked) log(`motionmockups: this version (${deps.version}) is blocked by the site: ${blocked.message} ${blocked.fix}`);
     wasBlocked = !!blocked;

@@ -47,7 +47,7 @@ Cursor, in `.cursor/mcp.json`:
 |---|---|
 | `list_scenes` | The scenes you can render, by device or collection: id, title, length, poster and the designer's notes. |
 | `recording_spec` | What to record for a device: screen size, frame rate, file types. |
-| `suggest_sequence` | Plans for a goal (`launch`, `app-demo`, `case-study` or `portfolio`) on one device, from the designer's sequences, each with its reason. |
+| `suggest_sequence` | Plans for a goal (such as `launch` or `portfolio`; the site names the goals) on one device, from the designer's sequences, each with its reason. |
 | `check_plan` | Checks a plan before a render: the problems the render would refuse, and the designer's taste as warnings. |
 | `render` | Renders a plan into a video, with the recording on the device screen. Lists any taste warning it went past under `overrides`. |
 | `still` | Renders one frame of a plan as a PNG or JPEG, with `overrides` as `render`. |
@@ -89,8 +89,15 @@ scene list, and the adapter passes it on as data in tool results:
 
 The notes are suggestions, and those marked `reviewed: false` are drafts.
 Only the site's briefing becomes the agent's instructions (at most 8,000
-characters); every note, sequence and description is capped in length, and a
-taste rule this adapter does not know is ignored with one line on stderr.
+characters). Everything else is capped: notes at 500 characters, sequence
+titles and reasons at 300, names (a scene's id, title and collection, a
+device, a move, a goal) at 100, a device's tips at 20 of 300 characters, and
+lists at 50. A taste rule this adapter does not know, or a value that makes
+no sense (a film length that ends before it starts, a clip count that is not
+a whole number above 0, an empty list of openers or closers), is ignored with
+one line on stderr; at most 20 such lines per start, then one counting the
+rest. A description the site gives for a tool this adapter does not have is
+never used.
 
 ## Settings
 
@@ -332,8 +339,17 @@ npm run mcpb        # motionmockups.mcpb, the Claude Desktop extension, from dis
 Releases are published only by the release workflow, from a version tag; see
 [RELEASING.md](RELEASING.md).
 
+`test/release.test.ts` holds the release checks, run in CI on Windows, macOS
+and Linux against the built bundle: a missing Chrome, a cancelled render
+followed by another, a blocked version and the file-system rules. On a CI
+runner a file-system rule the machine cannot set up fails instead of
+skipping.
+
 The render session tests need a site with the agent page:
-`MOTIONMOCKUPS_TEST_ORIGIN=http://127.0.0.1:4173 npm test`. The end-to-end
+`MOTIONMOCKUPS_TEST_ORIGIN=http://127.0.0.1:4173 npm test`. CI runs them on
+all three systems, a real free render from the public plates, only when the
+repository variable `MOTIONMOCKUPS_RELEASE_ORIGIN` names such a site; until
+then the `release-render` job is skipped, with a notice. The end-to-end
 run drives the built adapter as a real MCP server over stdio, through the MCP
 SDK's client, against such a site:
 

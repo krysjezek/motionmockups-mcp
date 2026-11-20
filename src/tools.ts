@@ -14,7 +14,7 @@ export const BUILT_IN_TEXT: Record<(typeof TOOL_NAMES)[number], string> = {
   recording_spec:
     "What to record for a device: the screen size in pixels, the frame rate, the accepted file types, the longest a screenshot can run and capture tips.",
   suggest_sequence:
-    "Suggest plans for a goal (launch, app-demo, case-study or portfolio) on one device, from the designer's sequences, each resolved to real scenes of one collection with a reason. Optionally give an aspect, a film length and a collection.",
+    "Suggest plans for a goal (e.g. launch or portfolio) on one device, from the designer's sequences, each resolved to real scenes of one collection with a reason. Optionally give an aspect, a film length and a collection.",
   check_plan:
     "Check a plan before rendering. Problems are rules the render enforces and must be fixed; warnings are the designer's taste, which you may go past when the person asks or has a reason. Each comes with a fix.",
   render:

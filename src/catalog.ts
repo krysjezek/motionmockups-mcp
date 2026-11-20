@@ -10,6 +10,7 @@
 import { DEFAULT_ORIGIN } from "./origin.ts";
 import type { Checked, Problem } from "./folders.ts";
 import { checkAdapters, type Adapters } from "./killswitch.ts";
+import { TOOL_NAMES } from "./tools.ts";
 
 /**
  * A scene's director's notes. Every field is optional here: a site may drop or add one, and
@@ -179,15 +180,21 @@ export function checkCatalog(value: unknown): AgentCatalog | string {
   const catalog: AgentCatalog = {
     contract: 1,
     briefing: value.briefing,
-    devices: value.devices as AgentCatalog["devices"],
+    // Rebuilt field by field, each name and list capped: a field the adapter does not know
+    // never reaches a tool result.
+    devices: (value.devices as Record<string, any>[]).map((d) => ({
+      device: cap(d.device, NAME_CHARS),
+      fps: d.fps,
+      screen: { width: d.screen.width, height: d.screen.height },
+      tips: (d.tips as string[]).slice(0, TIPS_MAX).map((tip) => cap(tip, TIP_CHARS)),
+    })),
     rules: r as unknown as AgentCatalog["rules"],
-    // Rebuilt field by field: a field the adapter does not know never reaches a tool result.
     scenes: (value.scenes as Record<string, unknown>[]).map((s) => {
       const scene: Scene = {
-        id: s.id as string,
-        device: s.device as string,
-        collection: s.collection as string,
-        title: s.title as string,
+        id: cap(s.id as string, NAME_CHARS),
+        device: cap(s.device as string, NAME_CHARS),
+        collection: cap(s.collection as string, NAME_CHARS),
+        title: cap(s.title as string, NAME_CHARS),
         seconds: s.seconds as number,
         poster: s.poster as string,
       };
@@ -217,10 +224,13 @@ export function checkCatalog(value: unknown): AgentCatalog | string {
 export const NOTE_CHARS = 500;
 /** The longest recipe title or why passed on. */
 export const TITLE_CHARS = 300;
-/** The longest name passed on (a move, a collection, a goal). */
-const NAME_CHARS = 100;
+/** The longest name passed on (a scene's id, title and collection, a device, a move, a goal). */
+export const NAME_CHARS = 100;
 /** The longest list passed on (moves, roles, pairs, clips). */
-const LIST_ITEMS = 50;
+export const LIST_ITEMS = 50;
+/** The longest device tip passed on, and how many of a device's tips. */
+export const TIP_CHARS = 300;
+export const TIPS_MAX = 20;
 /** The longest tool description taken from the site. */
 export const MAX_TOOL_TEXT = 2_000;
 /** The taste rule types this adapter knows. */
@@ -290,12 +300,17 @@ function cleanTaste(value: unknown, ignored: string[]): Taste | undefined {
       ignored.push(`the site's taste rule "${cap(key, NAME_CHARS)}" is not one this adapter knows; it is ignored.`);
       continue;
     }
-    if (key === "filmSeconds" && numbers(v) && (v as number[]).length === 2) taste.filmSeconds = [(v as number[])[0]!, (v as number[])[1]!];
+    // Values that make no sense are as unreadable as the wrong type: a film length runs from
+    // more than 0 s to no less than it starts, a clip count is a whole number of at least
+    // one, and an empty list of openers or closers would warn on every film.
+    if (key === "filmSeconds" && numbers(v) && (v as number[]).length === 2 && 0 < (v as number[])[0]! && (v as number[])[0]! <= (v as number[])[1]!)
+      taste.filmSeconds = [(v as number[])[0]!, (v as number[])[1]!];
     else if ((key === "oneCollection" || key === "noRepeatMoveBackToBack") && typeof v === "boolean") taste[key] = v;
-    else if ((key === "openers" || key === "closers") && strings(v)) taste[key] = (v as string[]).slice(0, 500).map((n) => cap(n, NAME_CHARS));
+    else if ((key === "openers" || key === "closers") && strings(v) && (v as string[]).length > 0)
+      taste[key] = (v as string[]).slice(0, 500).map((n) => cap(n, NAME_CHARS));
     else if (key === "avoidPairs" && pairs(v))
       taste.avoidPairs = (v as string[][]).slice(0, 500).map(([a, b]): [string, string] => [cap(a!, NAME_CHARS), cap(b!, NAME_CHARS)]);
-    else if (key === "maxClips" && isNumber(v)) taste.maxClips = v;
+    else if (key === "maxClips" && Number.isSafeInteger(v) && (v as number) > 0) taste.maxClips = v as number;
     else ignored.push(`the site's taste rule "${key}" has a value this adapter cannot read; it is ignored.`);
   }
   return taste;
@@ -341,6 +356,8 @@ function cleanGuidance(value: Record<string, unknown>, ignored: string[]): Parti
   if (isObject(value.toolText)) {
     const text: Record<string, string> = {};
     for (const [tool, v] of Object.entries(value.toolText)) {
+      // A tool this adapter does not have: its text is never used, so it is not kept.
+      if (!(TOOL_NAMES as readonly string[]).includes(tool)) continue;
       if (isString(v) && v.trim() && v.length <= MAX_TOOL_TEXT) text[tool] = v;
       else
         ignored.push(

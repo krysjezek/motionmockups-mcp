@@ -78,11 +78,21 @@ export function findChrome(
     if (!exists(chosen)) return refuse(`MOTIONMOCKUPS_CHROME is "${chosen}", but there is no file there.`);
     return { ok: true, value: chosen };
   }
-  const found = candidates(env, platform).find((c) => exists(c));
+  const looked = candidates(env, platform);
+  const found = looked.find((c) => exists(c));
   if (found) return { ok: true, value: found };
+  if (platform !== "linux") return refuse(`Google Chrome was not found. The adapter looked in ${listed(looked)}.`);
+  const dirs = [...new Set(looked.map((c) => path.posix.dirname(c)))];
   return refuse(
-    platform === "linux"
-      ? "Google Chrome or Chromium was not found on PATH."
-      : "Google Chrome was not found in the places it installs to.",
+    dirs.length
+      ? `Google Chrome or Chromium was not found on PATH. The adapter looked for ${listed(LINUX_NAMES)} in ${listed(dirs)}.`
+      : `Google Chrome or Chromium was not found: PATH names no folder to look in for ${listed(LINUX_NAMES)}.`,
   );
+}
+
+/** "a, b and c", at most `max` of them and then how many more: what the refusal names. */
+function listed(items: readonly string[], max = 10): string {
+  const shown = items.slice(0, max);
+  if (items.length > max) return `${shown.join(", ")} and ${items.length - max} more`;
+  return shown.length < 2 ? shown.join("") : `${shown.slice(0, -1).join(", ")} and ${shown.at(-1)}`;
 }
