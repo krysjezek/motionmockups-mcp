@@ -35,10 +35,12 @@ and open it with Claude Desktop. It asks for the folders Motion Mockups may
 use: your recordings are read from them and renders saved inside. The
 extension is the same single file npm publishes, with its manifest.
 
-Cursor, in `.cursor/mcp.json`:
+Cursor, in `.cursor/mcp.json`, with your project as the folder it may use
+(Cursor fills in `${workspaceFolder}` in `args`; folders after `mcp` are
+allowed, see [Settings](#settings)):
 
 ```json
-{ "mcpServers": { "motionmockups": { "command": "npx", "args": ["-y", "motionmockups", "mcp"] } } }
+{ "mcpServers": { "motionmockups": { "command": "npx", "args": ["-y", "motionmockups", "mcp", "${workspaceFolder}"] } } }
 ```
 
 ## Tools
@@ -286,8 +288,8 @@ with a bug that loses renders. Its scene list may carry:
 
 A version outside `allowed`, or listed in `blocked`, answers every tool with
 a refusal of code `blocked`: the site's message (at most 500 characters) and
-a fix that names the update, `npx motionmockups@latest` or a newer Claude
-Desktop extension. `account` and `connect_account` with `disconnect: true`
+a fix that names the update: restart the agent so `npx` fetches the newest
+`motionmockups@1`, or install the newest Claude Desktop extension. `account` and `connect_account` with `disconnect: true`
 keep working, so a connection can still be removed. The tools and their
 descriptions stay as they were; only the results refuse.
 

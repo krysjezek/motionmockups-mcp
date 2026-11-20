@@ -108,8 +108,12 @@ test("verdict: allowed, blocked by the list, outside the range, a missing block,
   assert.equal(listed.code, "blocked");
   assert.equal(listed.message, "0.1.2 loses renders. Update.");
   assert.equal(listed.fix, UPGRADE_FIX);
-  assert.match(UPGRADE_FIX, /npx motionmockups@latest/);
-  assert.match(UPGRADE_FIX, /Claude Desktop extension/);
+  // The install lines pin motionmockups@1; never send the person past the major they chose.
+  assert.equal(
+    UPGRADE_FIX,
+    "Restart your agent so npx fetches the newest motionmockups@1, or install the newest Claude Desktop extension.",
+  );
+  assert.doesNotMatch(UPGRADE_FIX, /@latest/);
   assert.equal(blockedProblem({ blocked: ["0.1.2"], message: "" }, "0.1.3"), undefined, "only the listed version");
   assert.equal(blockedProblem({ blocked: ["0.1.2"], message: "" }, "0.1.2+build.7")?.code, "blocked", "the list compares versions, not text");
 

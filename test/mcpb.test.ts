@@ -140,15 +140,17 @@ test("mcpb: no personal path, name or e-mail address in the manifest or the bund
   }
 });
 
-test("mcpb: the format's own tools unpack it and pass its manifest (skips offline)", async (t: TestContext) => {
-  try {
-    await lookup("registry.npmjs.org");
-  } catch {
-    t.skip("the npm registry cannot be reached");
-    return;
-  }
+test("mcpb: the format's own tools, the locked devDependency, unpack it and pass its manifest", () => {
+  // Exactly the version package-lock.json pins with its integrity hash, installed by npm ci
+  // (it needs no install script), never fetched on the fly.
+  assert.equal(pkg.devDependencies["@anthropic-ai/mcpb"], "2.1.2");
+  const locked = JSON.parse(fs.readFileSync(at("package-lock.json"), "utf8")).packages["node_modules/@anthropic-ai/mcpb"];
+  assert.equal(locked.version, "2.1.2");
+  assert.match(locked.integrity, /^sha512-/);
+  assert.ok(!locked.hasInstallScript);
   const out = path.join(folder, "unpacked");
-  const mcpbCli = "npx --yes @anthropic-ai/mcpb@2.1.2";
+  const bin = fileURLToPath(at(`node_modules/.bin/${process.platform === "win32" ? "mcpb.cmd" : "mcpb"}`));
+  const mcpbCli = `"${bin}"`;
   execSync(`${mcpbCli} unpack "${mcpb}" "${out}"`, { stdio: "pipe", timeout: 180_000 });
   assert.deepEqual(fs.readdirSync(out, { recursive: true }).map((p) => String(p).replaceAll("\\", "/")).sort(), [ENTRY, "manifest.json"].sort());
   const result = execSync(`${mcpbCli} validate "${path.join(out, "manifest.json")}"`, { stdio: "pipe", timeout: 180_000 }).toString();

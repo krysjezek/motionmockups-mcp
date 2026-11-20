@@ -24,7 +24,8 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: ${{ matrix.node }}
-      - run: npm ci
+      - run: npm ci --ignore-scripts
+      # As release.yml installs: every dependency as package-lock.json pins it, no install script.
       # The tests are TypeScript run by Node's own type stripping, which Node 20 does not
       # have. On Node 20 the built bundle is checked by the smoke test below instead.
       # GitHub's runners have Chrome installed, so the Chrome launch tests and the release checks
@@ -46,8 +47,8 @@ jobs:
         if: matrix.os == 'ubuntu-latest' && matrix.node == 24
         run: |
           node scripts/mcpb.mjs
-          npx --yes @anthropic-ai/mcpb@2.1.2 unpack motionmockups.mcpb "$RUNNER_TEMP/mcpb"
-          npx --yes @anthropic-ai/mcpb@2.1.2 validate "$RUNNER_TEMP/mcpb/manifest.json"
+          node_modules/.bin/mcpb unpack motionmockups.mcpb "$RUNNER_TEMP/mcpb"
+          node_modules/.bin/mcpb validate "$RUNNER_TEMP/mcpb/manifest.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: matrix.os == 'ubuntu-latest' && matrix.node == 24
         with:
@@ -81,7 +82,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       # The session tests make their recording with ffmpeg and measure the film with ffprobe.
       - name: Install ffmpeg
         if: runner.os == 'Linux'

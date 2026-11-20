@@ -19,7 +19,7 @@ import type { Problem } from "./folders.ts";
 /** The longest site message passed on in a refusal. */
 export const MESSAGE_CHARS = 500;
 export const UPGRADE_FIX =
-  "Ask the person to update the adapter: run it as `npx motionmockups@latest`, or update the Claude Desktop extension, then restart the MCP client.";
+  "Restart your agent so npx fetches the newest motionmockups@1, or install the newest Claude Desktop extension.";
 
 /** The `adapters` block as the adapter keeps it; `allowed` absent allows every version. */
 export interface Adapters {

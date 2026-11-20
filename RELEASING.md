@@ -1,9 +1,15 @@
 # Releasing
 
 Only `.github/workflows/release.yml` publishes, from a pushed tag `vX.Y.Z` of a
-commit on `main` in this repository. Its `build` job runs the tests, the build,
-the smoke test and `npm pack`, with no publishing rights. Its `publish` job
-publishes that tested tarball to npm with provenance through npm trusted
+commit on `main` in this repository. Its `build` job installs exactly what
+`package-lock.json` pins (`npm ci --ignore-scripts`; the `.mcpb` checker,
+`@anthropic-ai/mcpb`, is a locked devDependency, never fetched on the fly),
+builds, smoke-tests, packs the tarball and the extension and uploads them,
+and only then runs the tests and checks the extension with the format's own
+tools, with no publishing rights; a failure there stops the release. Its
+`attest` job signs a build provenance attestation for `motionmockups.mcpb`
+(`actions/attest-build-provenance`), and runs no project code. Its `publish`
+job publishes that tarball to npm with provenance through npm trusted
 publishing (no npm token exists anywhere), and runs no project code. Its
 `release` job attaches `motionmockups.mcpb`, the Claude Desktop extension, to
 a GitHub release. Never run `npm publish` from a computer.
@@ -46,9 +52,20 @@ a GitHub release. Never run `npm publish` from a computer.
 
 ## Each release
 
-1. Bump the version: `npm version X.Y.Z --no-git-tag-version`, then update
-   the README if the install lines change (they pin `motionmockups@1` from
-   1.0.0 on). Commit, push `main` and wait for CI to be green.
+1. Bump the version: `npm version X.Y.Z --no-git-tag-version` (it updates
+   `package.json` and `package-lock.json`; the extension's manifest takes
+   the version from `package.json`). The 1.0.0 bump commit also carries:
+   - the licence you chose, in `package.json`'s `license`, with its text in
+     a `LICENSE` file (`test/package.test.ts` asks for one whenever the
+     licence is not `UNLICENSED`; npm packs it whatever `files` says);
+   - the README without its "Preview, not yet released" banner and without
+     the pre-release paragraph under Install;
+   - every install line pinned to `motionmockups@1`: `npx -y motionmockups@1 mcp`,
+     the Claude Code line and the Cursor line (keeping `${workspaceFolder}`);
+   - the package description without "Preview, not yet released.".
+
+   A later bump only changes the version, and the install lines if the
+   major changes. Commit, push `main` and wait for CI to be green.
 2. Tag the commit on `main` and push the tag:
 
    ```sh
@@ -60,12 +77,20 @@ a GitHub release. Never run `npm publish` from a computer.
    or whose commit is not on `main`. A prerelease version (`X.Y.Z-beta.1`)
    is published under the npm dist-tag `next`, never `latest`. A `v0.*` tag
    or a prerelease makes a GitHub prerelease.
-3. Watch the Release run in the Actions tab until all three jobs are green.
+3. Watch the Release run in the Actions tab until all four jobs are green.
 4. Check provenance: the package page on npmjs.com shows "Built and signed
    on GitHub Actions" linking this repository, the workflow and the tag's
    commit, and `npm audit signatures` in a project that installs it reports
    a verified attestation.
-5. Check the GitHub release carries `motionmockups.mcpb`.
+5. Check the GitHub release carries `motionmockups.mcpb`, and that its
+   attestation verifies: download it, then
+   `gh attestation verify motionmockups.mcpb --repo krysjezek/motionmockups-mcp --signer-workflow krysjezek/motionmockups-mcp/.github/workflows/release.yml`
+   passes and names the tag's commit. The attestation is also
+   listed under the repository's Actions, Attestations.
+6. After 1.0.0 only: deprecate the pre-release placeholder,
+   `npm deprecate motionmockups@"<1.0.0" "Pre-release placeholder; use motionmockups@1."`.
+   The `0.0.1` placeholder never checks the kill switch, so deprecation is
+   the only warning its users get.
 
 If something went wrong after publishing, block the version with the site's
 kill switch (README, "Kill switch") and publish a fixed one; npm versions
